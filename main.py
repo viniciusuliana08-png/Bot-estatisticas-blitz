@@ -80,17 +80,11 @@ async def blitz(ctx):
     return m.author == ctx.author and m.channel == ctx.channel
 
   try:
-    # --- PASSO 1: Perguntar Nickname (Tempo: 90s) ---
+    # --- PASSO 1: Escolher Função Primeiro (Tempo: 90s) ---
     await ctx.send(
-        "🎮 **Menu Blitz**\nQual é o seu **nickname** no World of Tanks Blitz?"
-    )
-    msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
-    nickname = msg_nick.content.strip()
-
-    # --- PASSO 2: Escolher Função (Tempo: 90s) ---
-    await ctx.send(
-        f"O que você deseja fazer para o jogador **{nickname}**?\n"
-        "1️⃣ Ver Estatísticas\n"
+        "🎮 **Menu Blitz**\n"
+        "O que você deseja fazer?\n"
+        "1️⃣ Ver Estatísticas de um Jogador\n"
         "2️⃣ Calcular Meta de Winrate\n\n"
         "*Digite `1` ou `2`:*"
     )
@@ -99,6 +93,14 @@ async def blitz(ctx):
 
     # --- FLUXO 1: Estatísticas do Jogador ---
     if opcao == "1":
+      # Pede o nickname
+      await ctx.send(
+          "Qual é o **nickname** do jogador no World of Tanks Blitz?"
+      )
+      msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
+      nickname = msg_nick.content.strip()
+
+      # Escolher Período
       await ctx.send(
           "Escolha o **período** das estatísticas:\n"
           "1️⃣ 24 Horas (`1d`)\n"
@@ -327,9 +329,7 @@ async def blitz(ctx):
       )
       total_final = partidas_atuais + partidas_restantes
 
-      embed = discord.Embed(
-          title=f"🧮 Meta de Winrate para {nickname}", color=0x2ECC71
-      )
+      embed = discord.Embed(title="🧮 Meta de Winrate", color=0x2ECC71)
       embed.add_field(
           name="📌 Dados Informados",
           value=(
