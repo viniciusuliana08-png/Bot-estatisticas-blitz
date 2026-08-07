@@ -80,4 +80,33 @@ async def blitz(ctx, *, nickname: str):
         await msg.edit(content=None, embed=embed)
 
 bot.run(DISCORD_TOKEN)
+
+import os
+from threading import Thread
+from flask import Flask
+
+app = Flask("")
+
+
+@app.route("/")
+def home():
+  return "Bot online!"
+
+
+def run():
+  port = int(os.environ.get("PORT", 10000))
+  app.run(host="0.0.0.0", port=port)
+
+
+def keep_alive():
+  t = Thread(target=run)
+  t.start()
+
+
+# Chame essa função logo antes de ligar o bot do Discord
+keep_alive()
+
+# Aqui continua o seu código normal para rodar o bot:
+# client.run(os.environ.get("DISCORD_TOKEN"))
+
       
