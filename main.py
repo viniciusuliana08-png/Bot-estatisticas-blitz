@@ -1,3 +1,76 @@
+import asyncio
+import os
+from threading import Thread
+import aiohttp
+import discord
+from discord.ext import commands
+from flask import Flask
+
+# --- 1. SERVIDOR WEB (FLASK) ---
+app = Flask("")
+
+
+@app.route("/")
+def home():
+  return "Bot online!"
+
+
+def run():
+  port = int(os.environ.get("PORT", 10000))
+  app.run(host="0.0.0.0", port=port)
+
+
+def keep_alive():
+  t = Thread(target=run)
+  t.start()
+
+
+# --- 2. CONFIGURAÇÃO DO BOT DISCORD ---
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+APPLICATION_ID = os.environ.get("APPLICATION_ID")
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+
+
+async def find_player(nickname: str, session: aiohttp.ClientSession):
+  regions = {
+      "na": "https://api.wotblitz.com",
+      "eu": "https://api.wotblitz.eu",
+      "asia": "https://api.wotblitz.asia",
+  }
+  timeout = aiohttp.ClientTimeout(total=10)
+
+  for reg_code, base_url in regions.items():
+    search_url = f"{base_url}/wotb/account/list/?application_id={APPLICATION_ID}&search={nickname}"
+    try:
+      async with session.get(search_url, timeout=timeout) as resp:
+        if resp.status == 200:
+          data = await resp.json()
+          if (
+              data.get("status") == "ok"
+              and data.get("data")
+              and len(data["data"]) > 0
+          ):
+            return (
+                reg_code,
+                base_url,
+                data["data"][0]["account_id"],
+                data["data"][0]["nickname"],
+            )
+        await asyncio.sleep(0.3)
+    except Exception as e:
+      print(f"Erro na busca ({reg_code}): {e}")
+
+  return None, None, None, None
+
+
+@bot.event
+async def on_ready():
+  print(f"Bot conectado com sucesso como {bot.user}")
+
+
 @bot.command()
 async def blitz(ctx, *, nickname: str):
   """Sintaxe: !blitz SeuNickAqui"""
@@ -51,7 +124,7 @@ async def blitz(ctx, *, nickname: str):
 
         stats_all = player_info["statistics"]["all"]
 
-      # Formatação das estatísticas das últimas 24h
+      # Formatação das estatísticas de 24h
       p24 = bs_data.get("period24h", {}) if isinstance(bs_data, dict) else {}
       battles_24 = p24.get("battles", 0)
 
@@ -68,7 +141,7 @@ async def blitz(ctx, *, nickname: str):
       else:
         diario_txt = "Nenhuma partida registrada nas últimas 24 horas."
 
-      # Formatação das estatísticas gerais
+      # Formatação das estatísticas Gerais
       battles_all = stats_all.get("battles", 0)
       wins_all = stats_all.get("wins", 0)
       wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -95,10 +168,15 @@ async def blitz(ctx, *, nickname: str):
       embed.add_field(name="🏆 Carreira (Geral)", value=geral_txt, inline=False)
       embed.set_footer(text="Integrado com Wargaming API & BlitzStars")
 
-      # Apaga a mensagem temporária e envia a resposta com o Embed
+      # Apaga a mensagem temporária e envia o Embed completo
       await msg.delete()
       await ctx.send(embed=embed)
 
   except Exception as e:
     print(f"Erro no comando blitz: {e}")
     await msg.edit(content=f"Ocorreu um erro ao buscar dados: `{e}`")
+
+
+# --- 3. INICIALIZAÇÃO ---
+keep_alive()
+bot.run(DISCORD_TOKEN)
