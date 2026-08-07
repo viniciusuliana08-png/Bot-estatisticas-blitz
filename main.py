@@ -80,25 +80,26 @@ async def blitz(ctx):
     return m.author == ctx.author and m.channel == ctx.channel
 
   try:
-    # --- PASSO 1: Perguntar Nickname ---
+    # --- PASSO 1: Perguntar Nickname (Tempo: 90s) ---
     await ctx.send(
         "🎮 **Menu Blitz**\nQual é o seu **nickname** no World of Tanks Blitz?"
     )
-    msg_nick = await bot.wait_for("message", check=check, timeout=30.0)
+    msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
     nickname = msg_nick.content.strip()
 
-    # --- PASSO 2: Escolher Função ---
+    # --- PASSO 2: Escolher Função (Tempo: 90s) ---
     await ctx.send(
         f"O que você deseja fazer para o jogador **{nickname}**?\n"
         "1️⃣ Ver Estatísticas\n"
         "2️⃣ Calcular Meta de Winrate\n\n"
         "*Digite `1` ou `2`:*"
     )
-    msg_opcao = await bot.wait_for("message", check=check, timeout=30.0)
+    msg_opcao = await bot.wait_for("message", check=check, timeout=90.0)
     opcao = msg_opcao.content.strip()
 
     # --- FLUXO 1: Estatísticas do Jogador ---
     if opcao == "1":
+      # Escolher Período (Tempo: 90s)
       await ctx.send(
           "Escolha o **período** das estatísticas:\n"
           "1️⃣ 24 Horas (`1d`)\n"
@@ -107,7 +108,7 @@ async def blitz(ctx):
           "4️⃣ 90 Dias (`90d`)\n\n"
           "*Digite `1`, `2`, `3` ou `4`:*"
       )
-      msg_periodo = await bot.wait_for("message", check=check, timeout=30.0)
+      msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
       escolha = msg_periodo.content.strip().lower()
 
       period_map = {
@@ -243,13 +244,14 @@ async def blitz(ctx):
 
     # --- FLUXO 2: Calculadora de Winrate ---
     elif opcao == "2":
+      # Enviar Dados da Calculadora (Tempo: 135s)
       await ctx.send(
           "🧮 **Calculadora de WR**\n"
           "Envie os seguintes 4 dados separados por espaço:\n"
           "`<partidas_atuais> <wr_atual> <wr_recente> <wr_alvo>`\n\n"
           "*Exemplo:* `1000 47 53 50`"
       )
-      msg_calc = await bot.wait_for("message", check=check, timeout=45.0)
+      msg_calc = await bot.wait_for("message", check=check, timeout=135.0)
       dados = msg_calc.content.strip().split()
 
       if len(dados) < 4:
