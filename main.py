@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 from flask import Flask
 
-# --- 1. SERVIDOR WEB (FLASK) ---
+# --- 1. SERVIDOR WEB (FLASK) PARA MANTER O BOT ATIVO NO RENDER ---
 app = Flask("")
 
 
@@ -35,7 +35,7 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 
 
 async def find_player(nickname: str, session: aiohttp.ClientSession):
-  # Domínios oficiais corretos da Wargaming
+  # URLs oficiais de cada região da Wargaming
   regions = {
       "na": "https://api.wotblitz.com",
       "eu": "https://api.wotblitz.eu",
@@ -94,7 +94,7 @@ async def blitz(ctx, *, nickname: str):
 
       timeout = aiohttp.ClientTimeout(total=10)
 
-      # 1. Dados Diários (BlitzStars)
+      # 1. Busca Dados Diários (BlitzStars)
       blitzstars_url = f"https://www.blitzstars.com/api/playerstats/{account_id}"
       bs_data = {}
       try:
@@ -104,7 +104,7 @@ async def blitz(ctx, *, nickname: str):
       except Exception as e:
         print(f"Erro ao acessar BlitzStars: {e}")
 
-      # 2. Dados Gerais (Wargaming API)
+      # 2. Busca Dados Gerais (Wargaming API)
       info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
       async with session.get(info_url, timeout=timeout) as resp:
         wg_data = await resp.json()
@@ -113,7 +113,7 @@ async def blitz(ctx, *, nickname: str):
           return
         stats_all = wg_data["data"][str(account_id)]["statistics"]["all"]
 
-      # Formatação dos dados de 24h
+      # Formatação das estatísticas das últimas 24h
       p24 = bs_data.get("period24h", {}) if isinstance(bs_data, dict) else {}
       battles_24 = p24.get("battles", 0)
 
@@ -130,7 +130,7 @@ async def blitz(ctx, *, nickname: str):
       else:
         diario_txt = "Nenhuma partida registrada nas últimas 24h."
 
-      # Formatação dos dados Gerais
+      # Formatação das estatísticas de Carreira (Geral)
       battles_all = stats_all.get("battles", 0)
       wins_all = stats_all.get("wins", 0)
       wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -146,7 +146,7 @@ async def blitz(ctx, *, nickname: str):
           f"**Dano Médio Geral:** {avg_dmg_all:.0f}"
       )
 
-      # Criando Embed para resposta no Discord
+      # Montagem e envio do Card Embed no Discord
       embed = discord.Embed(
           title=f"Estatísticas de {player_name} [{region_code.upper()}]",
           color=discord.Color.gold(),
@@ -157,7 +157,7 @@ async def blitz(ctx, *, nickname: str):
       embed.add_field(name="Carreira (Geral)", value=geral_txt, inline=False)
       embed.set_footer(text="Integrado com Wargaming API & BlitzStars")
 
-      await msg.edit(content=None, embed=embed)
+      await msg.edit(content="", embed=embed)
 
   except Exception as e:
     print(f"Erro ao processar comando: {e}")
