@@ -74,13 +74,13 @@ async def on_ready():
 
 @bot.command()
 async def blitz(ctx):
-  """Menu interativo do bot. Basta digitar !blitz e responder às perguntas."""
+  """Menu interativo do bot."""
 
   def check(m):
     return m.author == ctx.author and m.channel == ctx.channel
 
   try:
-    # --- PASSO 1: Escolher Função Primeiro (Tempo: 90s) ---
+    # --- PASSO 1: Escolher Função Primeiro ---
     await ctx.send(
         "🎮 **Menu Blitz**\n"
         "O que você deseja fazer?\n"
@@ -93,14 +93,12 @@ async def blitz(ctx):
 
     # --- FLUXO 1: Estatísticas do Jogador ---
     if opcao == "1":
-      # Pede o nickname
       await ctx.send(
           "Qual é o **nickname** do jogador no World of Tanks Blitz?"
       )
       msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
       nickname = msg_nick.content.strip()
 
-      # Escolher Período
       await ctx.send(
           "Escolha o **período** das estatísticas:\n"
           "1️⃣ 24 Horas (`1d`)\n"
@@ -112,26 +110,35 @@ async def blitz(ctx):
       msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
       escolha = msg_periodo.content.strip().lower()
 
+      # Mapeamento para as diferentes chaves que a API BlitzStars utiliza
       period_map = {
-          "1": ("period24h", "24 Horas"),
-          "1d": ("period24h", "24 Horas"),
-          "2": ("period7d", "7 Dias"),
-          "7d": ("period7d", "7 Dias"),
-          "3": ("period30d", "30 Dias"),
-          "30d": ("period30d", "30 Dias"),
-          "4": ("period90d", "90 Dias"),
-          "90d": ("period90d", "90 Dias"),
+          "1": (["period24h", "period1d", "period1"], "24 Horas"),
+          "1d": (["period24h", "period1d", "period1"], "24 Horas"),
+          "2": (["period7d", "period7"], "7 Dias"),
+          "7d": (["period7d", "period7"], "7 Dias"),
+          "3": (["period30d", "period30"], "30 Dias"),
+          "30d": (["period30d", "period30"], "30 Dias"),
+          "4": (["period90d", "period90"], "90 Dias"),
+          "90d": (["period90d", "period90"], "90 Dias"),
       }
 
-      period_key, period_label = period_map.get(
-          escolha, ("period24h", "24 Horas")
+      possible_keys, period_label = period_map.get(
+          escolha, (["period24h", "period1d", "period1"], "24 Horas")
       )
 
       loading_msg = await ctx.send(
           f"🔍 Buscando dados de **{nickname}** nos servidores..."
       )
 
-      async with aiohttp.ClientSession() as session:
+      # Cabeçalho para evitar bloqueios na API do BlitzStars
+      headers = {
+          "User-Agent": (
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+              " (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+          )
+      }
+
+      async with aiohttp.ClientSession(headers=headers) as session:
         region_code, base_url, account_id, player_name = await find_player(
             nickname, session
         )
@@ -147,15 +154,15 @@ async def blitz(ctx):
 
         timeout = aiohttp.ClientTimeout(total=10)
 
-        # 1. Força a atualização do perfil no BlitzStars
+        # 1. Força a atualização no BlitzStars
         update_url = f"https://www.blitzstars.com/api/playerstats/{account_id}/update"
         try:
           async with session.get(update_url, timeout=timeout) as _:
             pass
         except Exception as e:
-          print(f"Aviso ao tentar forçar update no BlitzStars: {e}")
+          print(f"Aviso update BlitzStars: {e}")
 
-        # 2. Busca dados do BlitzStars
+        # 2. Busca os dados no BlitzStars
         blitzstars_url = (
             f"https://www.blitzstars.com/api/playerstats/{account_id}"
         )
@@ -163,11 +170,16 @@ async def blitz(ctx):
         try:
           async with session.get(blitzstars_url, timeout=timeout) as resp:
             if resp.status == 200:
-              bs_data = await resp.json()
+              raw_json = await resp.json()
+              # O BlitzStars pode retornar uma lista contendo o objeto do jogador ou um objeto direto
+              if isinstance(raw_json, list) and len(raw_json) > 0:
+                bs_data = raw_json[0]
+              elif isinstance(raw_json, dict):
+                bs_data = raw_json
         except Exception as e:
           print(f"Erro BlitzStars: {e}")
 
-        # 3. Busca dados gerais da Wargaming
+        # 3. Busca dados da Wargaming API
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
@@ -190,10 +202,13 @@ async def blitz(ctx):
 
           stats_all = player_info["statistics"]["all"]
 
-        # Formatação das estatísticas do período escolhido
-        period_data = (
-            bs_data.get(period_key, {}) if isinstance(bs_data, dict) else {}
-        )
+        # Busca os dados do período testando as chaves mapeadas
+        period_data = {}
+        for k in possible_keys:
+          if k in bs_data and isinstance(bs_data[k], dict):
+            period_data = bs_data[k]
+            break
+
         battles_p = period_data.get("battles", 0)
 
         if battles_p > 0:
@@ -201,17 +216,18 @@ async def blitz(ctx):
           wr_p = (wins_p / battles_p) * 100
           avg_dmg_p = period_data.get("damage_dealt", 0) / battles_p
           periodo_txt = (
-              f"• **Batalhas:** {battles_p}\n"
-              f"• **Vitórias:** {wins_p}V / {battles_p - wins_p}D\n"
+              f"• **Batalhas:** {battles_p:,}\n"
+              f"• **Vitórias:** {wins_p:,}V / {battles_p - wins_p:,}D\n"
               f"• **WR:** {wr_p:.2f}%\n"
               f"• **Dano Médio:** {avg_dmg_p:.0f}"
           )
         else:
           periodo_txt = (
-              f"Nenhuma partida registrada no período de {period_label}."
+              f"Nenhuma partida registrada no BlitzStars para o período de"
+              f" {period_label}."
           )
 
-        # Formatação das estatísticas gerais
+        # Estatísticas de carreira
         battles_all = stats_all.get("battles", 0)
         wins_all = stats_all.get("wins", 0)
         wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -243,11 +259,10 @@ async def blitz(ctx):
 
         await loading_msg.edit(content="", embed=embed)
 
-    # --- FLUXO 2: Calculadora de Winrate (Passo a Passo) ---
+    # --- FLUXO 2: Calculadora de Winrate ---
     elif opcao == "2":
       await ctx.send("🧮 **Calculadora de Meta de Winrate**")
 
-      # 1. Total de Batalhas Atuais
       await ctx.send("1️⃣ Quantas **batalhas no total** você tem atualmente?")
       msg1 = await bot.wait_for("message", check=check, timeout=90.0)
       try:
@@ -259,7 +274,6 @@ async def blitz(ctx):
         )
         return
 
-      # 2. Winrate Atual
       await ctx.send(
           "2️⃣ Qual é a sua **Taxa de Vitórias (Winrate) atual** em %?\n*Exemplo:"
           " `47.5`*"
@@ -275,7 +289,6 @@ async def blitz(ctx):
         )
         return
 
-      # 3. Winrate Recente Assumido
       await ctx.send(
           "3️⃣ Qual **Winrate recente** você pretende manter/jogar a partir de"
           " agora em %?\n*Exemplo: `53`*"
@@ -291,7 +304,6 @@ async def blitz(ctx):
         )
         return
 
-      # 4. Winrate Alvo
       await ctx.send(
           "4️⃣ Qual é a sua **Meta de Winrate (Alvo)** em %?\n*Exemplo: `50`*"
       )
@@ -306,7 +318,6 @@ async def blitz(ctx):
         )
         return
 
-      # Validações Lógicas da Matemática
       p_atual = winrate_atual / 100
       p_recente = winrate_recente / 100
       p_alvo = winrate_alvo / 100
