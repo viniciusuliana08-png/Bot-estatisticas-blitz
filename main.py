@@ -99,7 +99,6 @@ async def blitz(ctx):
 
     # --- FLUXO 1: Estatísticas do Jogador ---
     if opcao == "1":
-      # Escolher Período (Tempo: 90s)
       await ctx.send(
           "Escolha o **período** das estatísticas:\n"
           "1️⃣ 24 Horas (`1d`)\n"
@@ -242,30 +241,70 @@ async def blitz(ctx):
 
         await loading_msg.edit(content="", embed=embed)
 
-    # --- FLUXO 2: Calculadora de Winrate ---
+    # --- FLUXO 2: Calculadora de Winrate (Passo a Passo) ---
     elif opcao == "2":
-      # Enviar Dados da Calculadora (Tempo: 135s)
-      await ctx.send(
-          "🧮 **Calculadora de WR**\n"
-          "Envie os seguintes 4 dados separados por espaço:\n"
-          "`<partidas_atuais> <wr_atual> <wr_recente> <wr_alvo>`\n\n"
-          "*Exemplo:* `1000 47 53 50`"
-      )
-      msg_calc = await bot.wait_for("message", check=check, timeout=135.0)
-      dados = msg_calc.content.strip().split()
+      await ctx.send("🧮 **Calculadora de Meta de Winrate**")
 
-      if len(dados) < 4:
+      # 1. Total de Batalhas Atuais
+      await ctx.send("1️⃣ Quantas **batalhas no total** você tem atualmente?")
+      msg1 = await bot.wait_for("message", check=check, timeout=90.0)
+      try:
+        partidas_atuais = int(msg1.content.strip().replace(",", ""))
+      except ValueError:
         await ctx.send(
-            "❌ Formato inválido! Você precisa enviar os 4 números separados por"
-            " espaço."
+            "❌ Digite apenas números inteiros para as partidas. Exemplo:"
+            " `1000`"
         )
         return
 
-      partidas_atuais = int(dados[0])
-      winrate_atual = float(dados[1])
-      winrate_recente = float(dados[2])
-      winrate_alvo = float(dados[3])
+      # 2. Winrate Atual
+      await ctx.send(
+          "2️⃣ Qual é a sua **Taxa de Vitórias (Winrate) atual** em %?\n*Exemplo:"
+          " `47.5`*"
+      )
+      msg2 = await bot.wait_for("message", check=check, timeout=90.0)
+      try:
+        winrate_atual = float(
+            msg2.content.strip().replace("%", "").replace(",", ".")
+        )
+      except ValueError:
+        await ctx.send(
+            "❌ Digite um número válido para o Winrate atual. Exemplo: `47.5`"
+        )
+        return
 
+      # 3. Winrate Recente Assumido
+      await ctx.send(
+          "3️⃣ Qual **Winrate recente** você pretende manter/jogar a partir de"
+          " agora em %?\n*Exemplo: `53`*"
+      )
+      msg3 = await bot.wait_for("message", check=check, timeout=90.0)
+      try:
+        winrate_recente = float(
+            msg3.content.strip().replace("%", "").replace(",", ".")
+        )
+      except ValueError:
+        await ctx.send(
+            "❌ Digite um número válido para o Winrate recente. Exemplo: `53`"
+        )
+        return
+
+      # 4. Winrate Alvo
+      await ctx.send(
+          "4️⃣ Qual é a sua **Meta de Winrate (Alvo)** em %?\n*Exemplo: `50`*"
+      )
+      msg4 = await bot.wait_for("message", check=check, timeout=90.0)
+      try:
+        winrate_alvo = float(
+            msg4.content.strip().replace("%", "").replace(",", ".")
+        )
+      except ValueError:
+        await ctx.send(
+            "❌ Digite um número válido para a meta de Winrate. Exemplo: `50`"
+        )
+        return
+
+      # Validações Lógicas da Matemática
       p_atual = winrate_atual / 100
       p_recente = winrate_recente / 100
       p_alvo = winrate_alvo / 100
@@ -273,7 +312,7 @@ async def blitz(ctx):
       if p_recente <= p_alvo:
         await ctx.send(
             "❌ **Sua taxa recente precisa ser MAIOR que a taxa alvo** para"
-            " você subir seu WR."
+            " você conseguir subir seu WR geral."
         )
         return
 
