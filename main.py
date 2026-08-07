@@ -1,7 +1,6 @@
 import asyncio
 import math
 import os
-import time
 from threading import Thread
 import aiohttp
 import discord
@@ -37,6 +36,7 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 
 
 async def find_player(nickname: str, session: aiohttp.ClientSession):
+  """Busca o ID do jogador e região pela API da Wargaming."""
   regions = {
       "na": "https://api.wotblitz.com",
       "eu": "https://api.wotblitz.eu",
@@ -61,7 +61,7 @@ async def find_player(nickname: str, session: aiohttp.ClientSession):
                 data["data"][0]["account_id"],
                 data["data"][0]["nickname"],
             )
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
     except Exception as e:
       print(f"Erro na busca ({reg_code}): {e}")
 
@@ -81,7 +81,7 @@ async def blitz(ctx):
     return m.author == ctx.author and m.channel == ctx.channel
 
   try:
-    # --- PASSO 1: Escolher Função Primeiro ---
+    # --- PASSO 1: Menu principal ---
     await ctx.send(
         "🎮 **Menu Blitz**\n"
         "O que você deseja fazer?\n"
@@ -111,21 +111,21 @@ async def blitz(ctx):
       msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
       escolha = msg_periodo.content.strip().lower()
 
-      days_map = {
-          "1": (1, "24 Horas"),
-          "1d": (1, "24 Horas"),
-          "2": (7, "7 Dias"),
-          "7d": (7, "7 Dias"),
-          "3": (30, "30 Dias"),
-          "30d": (30, "30 Dias"),
-          "4": (90, "90 Dias"),
-          "90d": (90, "90 Dias"),
+      period_map = {
+          "1": ("1", "24 Horas"),
+          "1d": ("1", "24 Horas"),
+          "2": ("7", "7 Dias"),
+          "7d": ("7", "7 Dias"),
+          "3": ("30", "30 Dias"),
+          "30d": ("30", "30 Dias"),
+          "4": ("90", "90 Dias"),
+          "90d": ("90", "90 Dias"),
       }
 
-      days_limit, period_label = days_map.get(escolha, (1, "24 Horas"))
+      period_key, period_label = period_map.get(escolha, ("30", "30 Dias"))
 
       loading_msg = await ctx.send(
-          f"🔍 Buscando dados de **{nickname}** diretamente da Wargaming..."
+          f"🔍 Buscando dados de **{nickname}**..."
       )
 
       async with aiohttp.ClientSession() as session:
@@ -144,79 +144,48 @@ async def blitz(ctx):
 
         timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Busca dados gerais de carreira (Wargaming)
+        # 1. Consulta dados de Carreira Geral (Wargaming API)
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
+          player_info = wg_data.get("data", {}).get(str(account_id), {})
+          stats_all = player_info.get("statistics", {}).get("all", {})
 
-          if wg_data.get("status") != "ok":
-            await loading_msg.edit(
-                content="❌ Erro ao consultar dados na API da Wargaming."
-            )
-            return
+        # 2. Consulta Período Recente Exato (BlitzStars API)
+        bs_url = f"https://api.blitzstars.com/active-players/{account_id}"
+        periodo_txt = None
 
-          player_info = wg_data.get("data", {}).get(str(account_id))
-          if not player_info or not player_info.get("statistics"):
-            await loading_msg.edit(
-                content=(
-                    f"🔒 As estatísticas de **{player_name}** estão ocultas ou"
-                    " indisponíveis."
+        try:
+          async with session.get(bs_url, timeout=timeout) as resp:
+            if resp.status == 200:
+              bs_data = await resp.json()
+              period_data = bs_data.get(period_key)
+
+              if period_data and period_data.get("battles", 0) > 0:
+                battles_p = period_data.get("battles", 0)
+                wins_p = period_data.get("wins", 0)
+                damage_p = period_data.get("damage_dealt", 0)
+                losses_p = battles_p - wins_p
+
+                wr_p = (wins_p / battles_p) * 100
+                avg_dmg_p = damage_p / battles_p
+
+                periodo_txt = (
+                    f"• **Batalhas:** {battles_p:,}\n"
+                    f"• **Vitórias:** {wins_p:,}V / {losses_p:,}D\n"
+                    f"• **WR:** {wr_p:.2f}%\n"
+                    f"• **Dano Médio:** {avg_dmg_p:.0f}"
                 )
-            )
-            return
+        except Exception as e:
+          print(f"Erro na busca BlitzStars: {e}")
 
-          stats_all = player_info["statistics"]["all"]
-
-        # 2. Consulta estatísticas por tanques para obter batalhas recentes
-        tanks_url = f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}"
-        async with session.get(tanks_url, timeout=timeout) as resp:
-          tanks_data = await resp.json()
-
-        # Cálculo do limite de tempo em segundos
-        current_timestamp = int(time.time())
-        time_threshold = current_timestamp - (days_limit * 86400)
-
-        battles_p = 0
-        wins_p = 0
-        damage_p = 0
-
-        if (
-            tanks_data.get("status") == "ok"
-            and tanks_data.get("data")
-            and str(account_id) in tanks_data["data"]
-        ):
-          tank_list = tanks_data["data"][str(account_id)]
-          if tank_list:
-            for tank in tank_list:
-              last_battle = tank.get("last_battle_time", 0)
-              # Filtra tanques jogados dentro do limite do período
-              if last_battle >= time_threshold:
-                all_t = tank.get("all", {})
-                b = all_t.get("battles", 0)
-                w = all_t.get("wins", 0)
-                d = all_t.get("damage_dealt", 0)
-
-                battles_p += b
-                wins_p += w
-                damage_p += d
-
-        # Formatação do texto de período
-        if battles_p > 0:
-          wr_p = (wins_p / battles_p) * 100
-          avg_dmg_p = damage_p / battles_p
+        if not periodo_txt:
           periodo_txt = (
-              f"• **Batalhas:** {battles_p:,}\n"
-              f"• **Vitórias:** {wins_p:,}V / {battles_p - wins_p:,}D\n"
-              f"• **WR:** {wr_p:.2f}%\n"
-              f"• **Dano Médio:** {avg_dmg_p:.0f}"
-          )
-        else:
-          periodo_txt = (
-              f"Nenhuma atividade em tanques registrada nos últimos"
-              f" {period_label}."
+              f"Nenhuma atividade registrada nos últimos {period_label} no"
+              " BlitzStars."
           )
 
-        # Estatísticas Gerais de Carreira
+        # Dados da Carreira
         battles_all = stats_all.get("battles", 0)
         wins_all = stats_all.get("wins", 0)
         wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -244,7 +213,7 @@ async def blitz(ctx):
         embed.add_field(
             name="🏆 Carreira (Geral)", value=geral_txt, inline=False
         )
-        embed.set_footer(text="Dados obtidos via Wargaming API")
+        embed.set_footer(text="Dados obtidos via Wargaming API & BlitzStars")
 
         await loading_msg.edit(content="", embed=embed)
 
@@ -257,10 +226,7 @@ async def blitz(ctx):
       try:
         partidas_atuais = int(msg1.content.strip().replace(",", ""))
       except ValueError:
-        await ctx.send(
-            "❌ Digite apenas números inteiros para as partidas. Exemplo:"
-            " `1000`"
-        )
+        await ctx.send("❌ Digite apenas números inteiros. Exemplo: `1000`")
         return
 
       await ctx.send(
@@ -273,14 +239,12 @@ async def blitz(ctx):
             msg2.content.strip().replace("%", "").replace(",", ".")
         )
       except ValueError:
-        await ctx.send(
-            "❌ Digite um número válido para o Winrate atual. Exemplo: `47.5`"
-        )
+        await ctx.send("❌ Digite um número válido. Exemplo: `47.5`")
         return
 
       await ctx.send(
-          "3️⃣ Qual **Winrate recente** você pretende manter/jogar a partir de"
-          " agora em %?\n*Exemplo: `53`*"
+          "3️⃣ Qual **Winrate recente** você pretende manter a partir de agora"
+          " em %?\n*Exemplo: `53`*"
       )
       msg3 = await bot.wait_for("message", check=check, timeout=90.0)
       try:
@@ -288,9 +252,7 @@ async def blitz(ctx):
             msg3.content.strip().replace("%", "").replace(",", ".")
         )
       except ValueError:
-        await ctx.send(
-            "❌ Digite um número válido para o Winrate recente. Exemplo: `53`"
-        )
+        await ctx.send("❌ Digite um número válido. Exemplo: `53`")
         return
 
       await ctx.send(
@@ -302,9 +264,7 @@ async def blitz(ctx):
             msg4.content.strip().replace("%", "").replace(",", ".")
         )
       except ValueError:
-        await ctx.send(
-            "❌ Digite um número válido para a meta de Winrate. Exemplo: `50`"
-        )
+        await ctx.send("❌ Digite um número válido. Exemplo: `50`")
         return
 
       p_atual = winrate_atual / 100
@@ -314,7 +274,7 @@ async def blitz(ctx):
       if p_recente <= p_alvo:
         await ctx.send(
             "❌ **Sua taxa recente precisa ser MAIOR que a taxa alvo** para"
-            " você conseguir subir seu WR geral."
+            " subir seu WR geral."
         )
         return
 
@@ -361,8 +321,7 @@ async def blitz(ctx):
 
   except asyncio.TimeoutError:
     await ctx.send(
-        "⏰ **Tempo esgotado!** Você demorou muito para responder. Digite"
-        " `!blitz` para tentar novamente."
+        "⏰ **Tempo esgotado!** Digite `!blitz` para tentar novamente."
     )
   except Exception as e:
     await ctx.send(f"❌ Ocorreu um erro ao processar: `{e}`")
