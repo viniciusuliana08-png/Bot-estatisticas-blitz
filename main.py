@@ -1,76 +1,3 @@
-import asyncio
-import os
-from threading import Thread
-import aiohttp
-import discord
-from discord.ext import commands
-from flask import Flask
-
-# --- 1. SERVIDOR WEB (FLASK) ---
-app = Flask("")
-
-
-@app.route("/")
-def home():
-  return "Bot online!"
-
-
-def run():
-  port = int(os.environ.get("PORT", 10000))
-  app.run(host="0.0.0.0", port=port)
-
-
-def keep_alive():
-  t = Thread(target=run)
-  t.start()
-
-
-# --- 2. CONFIGURAÇÃO DO BOT DISCORD ---
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-APPLICATION_ID = os.environ.get("APPLICATION_ID")
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-
-
-async def find_player(nickname: str, session: aiohttp.ClientSession):
-  regions = {
-      "na": "https://api.wotblitz.com",
-      "eu": "https://api.wotblitz.eu",
-      "asia": "https://api.wotblitz.asia",
-  }
-  timeout = aiohttp.ClientTimeout(total=10)
-
-  for reg_code, base_url in regions.items():
-    search_url = f"{base_url}/wotb/account/list/?application_id={APPLICATION_ID}&search={nickname}"
-    try:
-      async with session.get(search_url, timeout=timeout) as resp:
-        if resp.status == 200:
-          data = await resp.json()
-          if (
-              data.get("status") == "ok"
-              and data.get("data")
-              and len(data["data"]) > 0
-          ):
-            return (
-                reg_code,
-                base_url,
-                data["data"][0]["account_id"],
-                data["data"][0]["nickname"],
-            )
-        await asyncio.sleep(0.3)
-    except Exception as e:
-      print(f"Erro na busca ({reg_code}): {e}")
-
-  return None, None, None, None
-
-
-@bot.event
-async def on_ready():
-  print(f"Bot conectado com sucesso como {bot.user}")
-
-
 @bot.command()
 async def blitz(ctx, *, nickname: str):
   """Sintaxe: !blitz SeuNickAqui"""
@@ -101,9 +28,9 @@ async def blitz(ctx, *, nickname: str):
           if resp.status == 200:
             bs_data = await resp.json()
       except Exception as e:
-        print(f"Erro ao acessar BlitzStars: {e}")
+        print(f"Erro BlitzStars: {e}")
 
-      # 2. Dados Gerais (Wargaming API)
+      # 2. Dados Gerais (Wargaming)
       info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
       async with session.get(info_url, timeout=timeout) as resp:
         wg_data = await resp.json()
@@ -116,15 +43,15 @@ async def blitz(ctx, *, nickname: str):
         if not player_info or not player_info.get("statistics"):
           await msg.edit(
               content=(
-                  f"As estatísticas do jogador **{player_name}** estão"
-                  " privadas ou indisponíveis."
+                  f"Estatísticas de **{player_name}** estão ocultas ou"
+                  " indisponíveis."
               )
           )
           return
 
         stats_all = player_info["statistics"]["all"]
 
-      # Formatação das estatísticas diárias (24h)
+      # Formatação das estatísticas das últimas 24h
       p24 = bs_data.get("period24h", {}) if isinstance(bs_data, dict) else {}
       battles_24 = p24.get("battles", 0)
 
@@ -133,15 +60,15 @@ async def blitz(ctx, *, nickname: str):
         wr_24 = (wins_24 / battles_24) * 100
         avg_dmg_24 = p24.get("damage_dealt", 0) / battles_24
         diario_txt = (
-            f"**Batalhas:** {battles_24}\n"
-            f"**Vitórias:** {wins_24}V / {battles_24 - wins_24}D\n"
-            f"**WR Diário:** {wr_24:.2f}%\n"
-            f"**Dano Médio:** {avg_dmg_24:.0f}"
+            f"• **Batalhas:** {battles_24}\n"
+            f"• **Vitórias:** {wins_24}V / {battles_24 - wins_24}D\n"
+            f"• **WR Diário:** {wr_24:.2f}%\n"
+            f"• **Dano Médio:** {avg_dmg_24:.0f}"
         )
       else:
-        diario_txt = "Nenhuma partida registrada nas últimas 24h."
+        diario_txt = "Nenhuma partida registrada nas últimas 24 horas."
 
-      # Formatação das estatísticas de Carreira (Geral)
+      # Formatação das estatísticas gerais
       battles_all = stats_all.get("battles", 0)
       wins_all = stats_all.get("wins", 0)
       wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -152,33 +79,26 @@ async def blitz(ctx, *, nickname: str):
       )
 
       geral_txt = (
-          f"**Total de Batalhas:** {battles_all:,}\n"
-          f"**WR Geral:** {wr_all:.2f}%\n"
-          f"**Dano Médio Geral:** {avg_dmg_all:.0f}"
+          f"• **Total de Batalhas:** {battles_all:,}\n"
+          f"• **WR Geral:** {wr_all:.2f}%\n"
+          f"• **Dano Médio Geral:** {avg_dmg_all:.0f}"
       )
 
-      # Criando Embed para resposta
+      # Construção do Embed
       embed = discord.Embed(
           title=f"Estatísticas de {player_name} [{region_code.upper()}]",
-          color=discord.Color.gold(),
+          color=0x3498DB,
       )
       embed.add_field(
-          name="Desempenho Hoje (24h)", value=diario_txt, inline=False
+          name="📊 Desempenho Hoje (24h)", value=diario_txt, inline=False
       )
-      embed.add_field(name="Carreira (Geral)", value=geral_txt, inline=False)
+      embed.add_field(name="🏆 Carreira (Geral)", value=geral_txt, inline=False)
       embed.set_footer(text="Integrado com Wargaming API & BlitzStars")
 
-      # Nunca passa content vazio
-      await msg.edit(
-          content=f"📊 **Estatísticas encontradas para {player_name}:**",
-          embed=embed,
-      )
+      # Apaga a mensagem temporária e envia a resposta com o Embed
+      await msg.delete()
+      await ctx.send(embed=embed)
 
   except Exception as e:
-    print(f"Erro ao processar comando: {e}")
+    print(f"Erro no comando blitz: {e}")
     await msg.edit(content=f"Ocorreu um erro ao buscar dados: `{e}`")
-
-
-# --- 3. INICIALIZAÇÃO ---
-keep_alive()
-bot.run(DISCORD_TOKEN)
