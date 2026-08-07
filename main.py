@@ -67,6 +67,45 @@ async def find_player(nickname: str, session: aiohttp.ClientSession):
   return None, None, None, None
 
 
+def extract_period_data(bs_json, target_period):
+  """Extrai os dados do período correto navegando pela estrutura de dados do BlitzStars."""
+  if not bs_json:
+    return {}
+
+  # Caso venha como lista de snapshots
+  target_obj = bs_json
+  if isinstance(bs_json, list) and len(bs_json) > 0:
+    target_obj = bs_json[0]
+
+  if not isinstance(target_obj, dict):
+    return {}
+
+  # Mapeamento de possíveis chaves
+  keys_to_check = []
+  if target_period == "24h":
+    keys_to_check = ["period24h", "period1d", "period1", "24h"]
+  elif target_period == "7d":
+    keys_to_check = ["period7d", "period7", "7d"]
+  elif target_period == "30d":
+    keys_to_check = ["period30d", "period30", "30d"]
+  elif target_period == "90d":
+    keys_to_check = ["period90d", "period90", "90d"]
+
+  # 1. Busca direta no objeto principal
+  for k in keys_to_check:
+    if k in target_obj and isinstance(target_obj[k], dict):
+      return target_obj[k]
+
+  # 2. Busca no contêiner 'periods' caso exista
+  if "periods" in target_obj and isinstance(target_obj["periods"], dict):
+    periods_dict = target_obj["periods"]
+    for k in keys_to_check:
+      if k in periods_dict and isinstance(periods_dict[k], dict):
+        return periods_dict[k]
+
+  return {}
+
+
 @bot.event
 async def on_ready():
   print(f"Bot conectado com sucesso como {bot.user}")
@@ -110,32 +149,29 @@ async def blitz(ctx):
       msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
       escolha = msg_periodo.content.strip().lower()
 
-      # Mapeamento para as diferentes chaves que a API BlitzStars utiliza
       period_map = {
-          "1": (["period24h", "period1d", "period1"], "24 Horas"),
-          "1d": (["period24h", "period1d", "period1"], "24 Horas"),
-          "2": (["period7d", "period7"], "7 Dias"),
-          "7d": (["period7d", "period7"], "7 Dias"),
-          "3": (["period30d", "period30"], "30 Dias"),
-          "30d": (["period30d", "period30"], "30 Dias"),
-          "4": (["period90d", "period90"], "90 Dias"),
-          "90d": (["period90d", "period90"], "90 Dias"),
+          "1": ("24h", "24 Horas"),
+          "1d": ("24h", "24 Horas"),
+          "2": ("7d", "7 Dias"),
+          "7d": ("7d", "7 Dias"),
+          "3": ("30d", "30 Dias"),
+          "30d": ("30d", "30 Dias"),
+          "4": ("90d", "90 Dias"),
+          "90d": ("90d", "90 Dias"),
       }
 
-      possible_keys, period_label = period_map.get(
-          escolha, (["period24h", "period1d", "period1"], "24 Horas")
-      )
+      period_code, period_label = period_map.get(escolha, ("24h", "24 Horas"))
 
       loading_msg = await ctx.send(
           f"🔍 Buscando dados de **{nickname}** nos servidores..."
       )
 
-      # Cabeçalho para evitar bloqueios na API do BlitzStars
       headers = {
           "User-Agent": (
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-              " (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-          )
+              " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          ),
+          "Accept": "application/json",
       }
 
       async with aiohttp.ClientSession(headers=headers) as session:
@@ -152,12 +188,14 @@ async def blitz(ctx):
           )
           return
 
-        timeout = aiohttp.ClientTimeout(total=10)
+        timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Força a atualização no BlitzStars
+        # 1. Força a atualização no BlitzStars (Tenta GET e POST)
         update_url = f"https://www.blitzstars.com/api/playerstats/{account_id}/update"
         try:
           async with session.get(update_url, timeout=timeout) as _:
+            pass
+          async with session.post(update_url, timeout=timeout) as _:
             pass
         except Exception as e:
           print(f"Aviso update BlitzStars: {e}")
@@ -166,20 +204,15 @@ async def blitz(ctx):
         blitzstars_url = (
             f"https://www.blitzstars.com/api/playerstats/{account_id}"
         )
-        bs_data = {}
+        bs_json = None
         try:
           async with session.get(blitzstars_url, timeout=timeout) as resp:
             if resp.status == 200:
-              raw_json = await resp.json()
-              # O BlitzStars pode retornar uma lista contendo o objeto do jogador ou um objeto direto
-              if isinstance(raw_json, list) and len(raw_json) > 0:
-                bs_data = raw_json[0]
-              elif isinstance(raw_json, dict):
-                bs_data = raw_json
+              bs_json = await resp.json()
         except Exception as e:
           print(f"Erro BlitzStars: {e}")
 
-        # 3. Busca dados da Wargaming API
+        # 3. Busca dados da Wargaming API (Carreira)
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
@@ -202,13 +235,8 @@ async def blitz(ctx):
 
           stats_all = player_info["statistics"]["all"]
 
-        # Busca os dados do período testando as chaves mapeadas
-        period_data = {}
-        for k in possible_keys:
-          if k in bs_data and isinstance(bs_data[k], dict):
-            period_data = bs_data[k]
-            break
-
+        # Extrai os dados do período
+        period_data = extract_period_data(bs_json, period_code)
         battles_p = period_data.get("battles", 0)
 
         if battles_p > 0:
@@ -223,8 +251,7 @@ async def blitz(ctx):
           )
         else:
           periodo_txt = (
-              f"Nenhuma partida registrada no BlitzStars para o período de"
-              f" {period_label}."
+              f"Nenhuma partida registrada no período de {period_label}."
           )
 
         # Estatísticas de carreira
