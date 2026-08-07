@@ -1,13 +1,14 @@
 import asyncio
 import math
 import os
+import time
 from threading import Thread
 import aiohttp
 import discord
 from discord.ext import commands
 from flask import Flask
 
-# --- 1. SERVIDOR WEB (FLASK PARA REPLIT/RENDER) ---
+# --- 1. SERVIDOR WEB (FLASK) ---
 app = Flask("")
 
 
@@ -60,50 +61,11 @@ async def find_player(nickname: str, session: aiohttp.ClientSession):
                 data["data"][0]["account_id"],
                 data["data"][0]["nickname"],
             )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
     except Exception as e:
       print(f"Erro na busca ({reg_code}): {e}")
 
   return None, None, None, None
-
-
-def extract_period_data(bs_json, target_period):
-  """Extrai os dados do período correto navegando pela estrutura de dados do BlitzStars."""
-  if not bs_json:
-    return {}
-
-  # Caso venha como lista de snapshots
-  target_obj = bs_json
-  if isinstance(bs_json, list) and len(bs_json) > 0:
-    target_obj = bs_json[0]
-
-  if not isinstance(target_obj, dict):
-    return {}
-
-  # Mapeamento de possíveis chaves
-  keys_to_check = []
-  if target_period == "24h":
-    keys_to_check = ["period24h", "period1d", "period1", "24h"]
-  elif target_period == "7d":
-    keys_to_check = ["period7d", "period7", "7d"]
-  elif target_period == "30d":
-    keys_to_check = ["period30d", "period30", "30d"]
-  elif target_period == "90d":
-    keys_to_check = ["period90d", "period90", "90d"]
-
-  # 1. Busca direta no objeto principal
-  for k in keys_to_check:
-    if k in target_obj and isinstance(target_obj[k], dict):
-      return target_obj[k]
-
-  # 2. Busca no contêiner 'periods' caso exista
-  if "periods" in target_obj and isinstance(target_obj["periods"], dict):
-    periods_dict = target_obj["periods"]
-    for k in keys_to_check:
-      if k in periods_dict and isinstance(periods_dict[k], dict):
-        return periods_dict[k]
-
-  return {}
 
 
 @bot.event
@@ -149,32 +111,24 @@ async def blitz(ctx):
       msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
       escolha = msg_periodo.content.strip().lower()
 
-      period_map = {
-          "1": ("24h", "24 Horas"),
-          "1d": ("24h", "24 Horas"),
-          "2": ("7d", "7 Dias"),
-          "7d": ("7d", "7 Dias"),
-          "3": ("30d", "30 Dias"),
-          "30d": ("30d", "30 Dias"),
-          "4": ("90d", "90 Dias"),
-          "90d": ("90d", "90 Dias"),
+      days_map = {
+          "1": (1, "24 Horas"),
+          "1d": (1, "24 Horas"),
+          "2": (7, "7 Dias"),
+          "7d": (7, "7 Dias"),
+          "3": (30, "30 Dias"),
+          "30d": (30, "30 Dias"),
+          "4": (90, "90 Dias"),
+          "90d": (90, "90 Dias"),
       }
 
-      period_code, period_label = period_map.get(escolha, ("24h", "24 Horas"))
+      days_limit, period_label = days_map.get(escolha, (1, "24 Horas"))
 
       loading_msg = await ctx.send(
-          f"🔍 Buscando dados de **{nickname}** nos servidores..."
+          f"🔍 Buscando dados de **{nickname}** diretamente da Wargaming..."
       )
 
-      headers = {
-          "User-Agent": (
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-              " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          ),
-          "Accept": "application/json",
-      }
-
-      async with aiohttp.ClientSession(headers=headers) as session:
+      async with aiohttp.ClientSession() as session:
         region_code, base_url, account_id, player_name = await find_player(
             nickname, session
         )
@@ -190,29 +144,7 @@ async def blitz(ctx):
 
         timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Força a atualização no BlitzStars (Tenta GET e POST)
-        update_url = f"https://www.blitzstars.com/api/playerstats/{account_id}/update"
-        try:
-          async with session.get(update_url, timeout=timeout) as _:
-            pass
-          async with session.post(update_url, timeout=timeout) as _:
-            pass
-        except Exception as e:
-          print(f"Aviso update BlitzStars: {e}")
-
-        # 2. Busca os dados no BlitzStars
-        blitzstars_url = (
-            f"https://www.blitzstars.com/api/playerstats/{account_id}"
-        )
-        bs_json = None
-        try:
-          async with session.get(blitzstars_url, timeout=timeout) as resp:
-            if resp.status == 200:
-              bs_json = await resp.json()
-        except Exception as e:
-          print(f"Erro BlitzStars: {e}")
-
-        # 3. Busca dados da Wargaming API (Carreira)
+        # 1. Busca dados gerais de carreira (Wargaming)
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
@@ -235,14 +167,43 @@ async def blitz(ctx):
 
           stats_all = player_info["statistics"]["all"]
 
-        # Extrai os dados do período
-        period_data = extract_period_data(bs_json, period_code)
-        battles_p = period_data.get("battles", 0)
+        # 2. Consulta estatísticas por tanques para obter batalhas recentes
+        tanks_url = f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}"
+        async with session.get(tanks_url, timeout=timeout) as resp:
+          tanks_data = await resp.json()
 
+        # Cálculo do limite de tempo em segundos
+        current_timestamp = int(time.time())
+        time_threshold = current_timestamp - (days_limit * 86400)
+
+        battles_p = 0
+        wins_p = 0
+        damage_p = 0
+
+        if (
+            tanks_data.get("status") == "ok"
+            and tanks_data.get("data")
+            and str(account_id) in tanks_data["data"]
+        ):
+          tank_list = tanks_data["data"][str(account_id)]
+          if tank_list:
+            for tank in tank_list:
+              last_battle = tank.get("last_battle_time", 0)
+              # Filtra tanques jogados dentro do limite do período
+              if last_battle >= time_threshold:
+                all_t = tank.get("all", {})
+                b = all_t.get("battles", 0)
+                w = all_t.get("wins", 0)
+                d = all_t.get("damage_dealt", 0)
+
+                battles_p += b
+                wins_p += w
+                damage_p += d
+
+        # Formatação do texto de período
         if battles_p > 0:
-          wins_p = period_data.get("wins", 0)
           wr_p = (wins_p / battles_p) * 100
-          avg_dmg_p = period_data.get("damage_dealt", 0) / battles_p
+          avg_dmg_p = damage_p / battles_p
           periodo_txt = (
               f"• **Batalhas:** {battles_p:,}\n"
               f"• **Vitórias:** {wins_p:,}V / {battles_p - wins_p:,}D\n"
@@ -251,10 +212,11 @@ async def blitz(ctx):
           )
         else:
           periodo_txt = (
-              f"Nenhuma partida registrada no período de {period_label}."
+              f"Nenhuma atividade em tanques registrada nos últimos"
+              f" {period_label}."
           )
 
-        # Estatísticas de carreira
+        # Estatísticas Gerais de Carreira
         battles_all = stats_all.get("battles", 0)
         wins_all = stats_all.get("wins", 0)
         wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -282,7 +244,7 @@ async def blitz(ctx):
         embed.add_field(
             name="🏆 Carreira (Geral)", value=geral_txt, inline=False
         )
-        embed.set_footer(text="Integrado com Wargaming API & BlitzStars")
+        embed.set_footer(text="Dados obtidos via Wargaming API")
 
         await loading_msg.edit(content="", embed=embed)
 
