@@ -112,17 +112,17 @@ async def blitz(ctx):
       escolha = msg_periodo.content.strip().lower()
 
       period_map = {
-          "1": ("1", "24 Horas"),
-          "1d": ("1", "24 Horas"),
-          "2": ("7", "7 Dias"),
-          "7d": ("7", "7 Dias"),
-          "3": ("30", "30 Dias"),
-          "30d": ("30", "30 Dias"),
-          "4": ("90", "90 Dias"),
-          "90d": ("90", "90 Dias"),
+          "1": (30, "30 Dias"),
+          "1d": (1, "24 Horas"),
+          "2": (7, "7 Dias"),
+          "7d": (7, "7 Dias"),
+          "3": (30, "30 Dias"),
+          "30d": (30, "30 Dias"),
+          "4": (90, "90 Dias"),
+          "90d": (90, "90 Dias"),
       }
 
-      period_key, period_label = period_map.get(escolha, ("30", "30 Dias"))
+      days_limit, period_label = period_map.get(escolha, (30, "30 Dias"))
 
       loading_msg = await ctx.send(
           f"🔍 Buscando dados de **{nickname}**..."
@@ -144,48 +144,74 @@ async def blitz(ctx):
 
         timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Consulta dados de Carreira Geral (Wargaming API)
+        # 1. Dados Globais da Carreira (Wargaming API)
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
           player_info = wg_data.get("data", {}).get(str(account_id), {})
           stats_all = player_info.get("statistics", {}).get("all", {})
 
-        # 2. Consulta Período Recente Exato (BlitzStars API)
-        bs_url = f"https://api.blitzstars.com/active-players/{account_id}"
+        # 2. Dados do Período (BlitzStars Endpoint de Estatísticas do Jogador)
+        bs_url = f"https://api.blitzstars.com/player/{account_id}/savestats"
         periodo_txt = None
 
         try:
-          async with session.get(bs_url, timeout=timeout) as resp:
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                  " AppleWebKit/537.36"
+              )
+          }
+          async with session.get(
+              bs_url, headers=headers, timeout=timeout
+          ) as resp:
             if resp.status == 200:
               bs_data = await resp.json()
-              period_data = bs_data.get(period_key)
 
-              if period_data and period_data.get("battles", 0) > 0:
-                battles_p = period_data.get("battles", 0)
-                wins_p = period_data.get("wins", 0)
-                damage_p = period_data.get("damage_dealt", 0)
-                losses_p = battles_p - wins_p
+              # Se for retornado uma lista de registros por período
+              if isinstance(bs_data, list) and len(bs_data) > 0:
+                # Procura a chave correspondente aos dias selecionados (ex: 'period30d', 'period7d', etc.)
+                p_key = f"period{days_limit}d"
+                matched_period = None
 
-                wr_p = (wins_p / battles_p) * 100
-                avg_dmg_p = damage_p / battles_p
+                for record in bs_data:
+                  if p_key in record:
+                    matched_period = record[p_key]
+                    break
+                  elif record.get("period") == days_limit:
+                    matched_period = record
+                    break
 
-                periodo_txt = (
-                    f"• **Batalhas:** {battles_p:,}\n"
-                    f"• **Vitórias:** {wins_p:,}V / {losses_p:,}D\n"
-                    f"• **WR:** {wr_p:.2f}%\n"
-                    f"• **Dano Médio:** {avg_dmg_p:.0f}"
-                )
+                if not matched_period and len(bs_data) > 0:
+                  matched_period = bs_data[0]
+
+                if matched_period:
+                  battles_p = matched_period.get("battles", 0)
+                  wins_p = matched_period.get("wins", 0)
+                  damage_p = matched_period.get("damage_dealt", 0)
+                  losses_p = battles_p - wins_p
+
+                  if battles_p > 0:
+                    wr_p = (wins_p / battles_p) * 100
+                    avg_dmg_p = damage_p / battles_p
+
+                    periodo_txt = (
+                        f"• **Batalhas:** {battles_p:,}\n"
+                        f"• **Vitórias:** {wins_p:,}V / {losses_p:,}D\n"
+                        f"• **WR:** {wr_p:.2f}%\n"
+                        f"• **Dano Médio:** {avg_dmg_p:.0f}"
+                    )
         except Exception as e:
           print(f"Erro na busca BlitzStars: {e}")
 
         if not periodo_txt:
           periodo_txt = (
               f"Nenhuma atividade registrada nos últimos {period_label} no"
-              " BlitzStars."
+              " BlitzStars.\n*(O jogador precisa ser buscado no site"
+              " Blitzstars.com para gerar histórico)*"
           )
 
-        # Dados da Carreira
+        # Dados da Carreira Geral
         battles_all = stats_all.get("battles", 0)
         wins_all = stats_all.get("wins", 0)
         wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
