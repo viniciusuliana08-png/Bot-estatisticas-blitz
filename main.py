@@ -1,6 +1,7 @@
 import asyncio
 import math
 import os
+import sqlite3
 import time
 from threading import Thread
 import aiohttp
@@ -27,7 +28,99 @@ def keep_alive():
   t.start()
 
 
-# --- 2. CONFIGURAÇÃO DO BOT DISCORD ---
+# --- 2. BANCO DE DADOS LOCAL (ESTILO AFTERMATH) ---
+DB_NAME = "blitz_stats.db"
+
+
+def init_db():
+  """Inicializa a tabela de snapshots históricos."""
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS player_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL,
+            battles INTEGER NOT NULL,
+            wins INTEGER NOT NULL,
+            damage INTEGER NOT NULL
+        )
+    """)
+  conn.commit()
+  conn.close()
+
+
+def save_snapshot(
+    account_id: int, battles: int, wins: int, damage: int
+) -> None:
+  """Grava o registro atual do jogador se houver mudança de batalhas."""
+  now = int(time.time())
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  # Verifica o último registro salvo
+  cursor.execute(
+      """
+        SELECT battles FROM player_snapshots 
+        WHERE account_id = ? 
+        ORDER BY timestamp DESC LIMIT 1
+    """,
+      (account_id,),
+  )
+  last = cursor.fetchone()
+
+  # Salva apenas se for o primeiro registro ou se o jogador jogou novas batalhas
+  if last is None or last[0] != battles:
+    cursor.execute(
+        """
+            INSERT INTO player_snapshots (account_id, timestamp, battles, wins, damage)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+        (account_id, now, battles, wins, damage),
+    )
+    conn.commit()
+  conn.close()
+
+
+def get_historical_snapshot(account_id: int, days: int):
+  """Busca o snapshot registrado mais próximo do período desejado."""
+  target_timestamp = int(time.time()) - (days * 86400)
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  # Busca o registro mais próximo da data limite estipulada
+  cursor.execute(
+      """
+        SELECT battles, wins, damage, timestamp 
+        FROM player_snapshots 
+        WHERE account_id = ? AND timestamp <= ?
+        ORDER BY timestamp DESC LIMIT 1
+    """,
+      (account_id, target_timestamp),
+  )
+  snapshot = cursor.fetchone()
+
+  # Caso não encontre nenhum anterior à data limite, pega o registro mais antigo disponível
+  if not snapshot:
+    cursor.execute(
+        """
+            SELECT battles, wins, damage, timestamp 
+            FROM player_snapshots 
+            WHERE account_id = ? 
+            ORDER BY timestamp ASC LIMIT 1
+        """,
+        (account_id,),
+    )
+    snapshot = cursor.fetchone()
+
+  conn.close()
+  return snapshot
+
+
+# Inicializa a base de dados
+init_db()
+
+# --- 3. CONFIGURAÇÃO DO BOT DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -81,7 +174,6 @@ async def blitz(ctx):
     return m.author == ctx.author and m.channel == ctx.channel
 
   try:
-    # --- PASSO 1: Menu Principal ---
     await ctx.send(
         "🎮 **Menu Blitz**\n"
         "O que você deseja fazer?\n"
@@ -92,7 +184,6 @@ async def blitz(ctx):
     msg_opcao = await bot.wait_for("message", check=check, timeout=90.0)
     opcao = msg_opcao.content.strip()
 
-    # --- FLUXO 1: Estatísticas do Jogador ---
     if opcao == "1":
       await ctx.send(
           "Qual é o **nickname** do jogador no World of Tanks Blitz?"
@@ -125,17 +216,10 @@ async def blitz(ctx):
       days_limit, period_label = days_map.get(escolha, (30, "30 Dias"))
 
       loading_msg = await ctx.send(
-          f"🔍 Buscando histórico de **{nickname}**..."
+          f"🔍 Buscando dados de **{nickname}**..."
       )
 
-      headers = {
-          "User-Agent": (
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-              " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          )
-      }
-
-      async with aiohttp.ClientSession(headers=headers) as session:
+      async with aiohttp.ClientSession() as session:
         region_code, base_url, account_id, player_name = await find_player(
             nickname, session
         )
@@ -151,100 +235,59 @@ async def blitz(ctx):
 
         timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Consulta dados atuais da Wargaming
+        # Consulta dados atuais na Wargaming API
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
           player_info = wg_data.get("data", {}).get(str(account_id), {})
           stats_all = player_info.get("statistics", {}).get("all", {})
 
-        # 2. Busca histórico no BlitzStars para cálculo de Delta (Aftermath Method)
-        bs_hist_url = (
-            f"https://www.blitzstars.com/api/playerstats/{account_id}"
-        )
-        snapshots = []
-        try:
-          async with session.get(bs_hist_url, timeout=timeout) as resp:
-            if resp.status == 200:
-              raw_json = await resp.json()
-              if isinstance(raw_json, list):
-                snapshots = raw_json
-              elif isinstance(raw_json, dict):
-                snapshots = [raw_json]
-        except Exception as e:
-          print(f"Erro na busca de histórico: {e}")
+        curr_battles = stats_all.get("battles", 0)
+        curr_wins = stats_all.get("wins", 0)
+        curr_damage = stats_all.get("damage_dealt", 0)
+
+        # Salva o estado atual no banco local
+        save_snapshot(account_id, curr_battles, curr_wins, curr_damage)
+
+        # Busca o snapshot antigo no banco de dados local
+        old_snap = get_historical_snapshot(account_id, days_limit)
 
         periodo_txt = None
 
-        if snapshots and len(snapshots) > 0 and stats_all:
-          current_battles = stats_all.get("battles", 0)
-          current_wins = stats_all.get("wins", 0)
-          current_damage = stats_all.get("damage_dealt", 0)
+        if old_snap:
+          old_battles, old_wins, old_damage, old_time = old_snap
 
-          now = time.time()
-          target_timestamp = now - (days_limit * 86400)
+          battles_delta = curr_battles - old_battles
+          wins_delta = curr_wins - old_wins
+          damage_delta = curr_damage - old_damage
 
-          # Encontra o snapshot histórico mais próximo da data limite selecionada
-          closest_snapshot = None
-          smallest_diff = float("inf")
+          if battles_delta > 0:
+            losses_delta = battles_delta - wins_delta
+            wr_delta = (wins_delta / battles_delta) * 100
+            avg_dmg_delta = damage_delta / battles_delta
 
-          for snap in snapshots:
-            snap_time = snap.get("createdAt") or snap.get("updatedAt")
-            if isinstance(snap_time, (int, float)):
-              # Converte para segundos se estiver em ms
-              if snap_time > 2000000000:
-                snap_time /= 1000
-
-              diff = abs(snap_time - target_timestamp)
-              if diff < smallest_diff:
-                smallest_diff = diff
-                closest_snapshot = snap
-
-          if closest_snapshot:
-            # Pega valores do snapshot antigo
-            old_all = closest_snapshot.get(
-                "all", closest_snapshot.get("statistics", {}).get("all", {})
+            periodo_txt = (
+                f"• **Batalhas:** {battles_delta:,}\n"
+                f"• **Vitórias:** {wins_delta:,}V / {losses_delta:,}D\n"
+                f"• **WR:** {wr_delta:.2f}%\n"
+                f"• **Dano Médio:** {avg_dmg_delta:.0f}"
             )
-            old_battles = old_all.get("battles", 0)
-            old_wins = old_all.get("wins", 0)
-            old_damage = old_all.get("damage_dealt", 0)
-
-            # Cálculo de Delta
-            battles_p = current_battles - old_battles
-            wins_p = current_wins - old_wins
-            damage_p = current_damage - old_damage
-
-            if battles_p > 0:
-              losses_p = battles_p - wins_p
-              wr_p = (wins_p / battles_p) * 100
-              avg_dmg_p = damage_p / battles_p
-
-              periodo_txt = (
-                  f"• **Batalhas:** {battles_p:,}\n"
-                  f"• **Vitórias:** {wins_p:,}V / {losses_p:,}D\n"
-                  f"• **WR:** {wr_p:.2f}%\n"
-                  f"• **Dano Médio:** {avg_dmg_p:.0f}"
-              )
 
         if not periodo_txt:
           periodo_txt = (
-              f"Nenhum histórico de snapshot encontrado para os últimos"
-              f" {period_label}.\n*(Para funcionar, o jogador precisa ter"
-              " registros salvos no BlitzStars durante este período)*"
+              f"Primeiro registro efetuado para **{player_name}**!\n"
+              "*À medida que novas buscas forem feitas ao longo dos dias, os"
+              " deltas e relatórios periódicos serão calculados automaticamente.*"
           )
 
         # Estatísticas Globais de Carreira
-        battles_all = stats_all.get("battles", 0)
-        wins_all = stats_all.get("wins", 0)
-        wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
+        wr_all = (curr_wins / curr_battles * 100) if curr_battles > 0 else 0
         avg_dmg_all = (
-            (stats_all.get("damage_dealt", 0) / battles_all)
-            if battles_all > 0
-            else 0
+            (curr_damage / curr_battles) if curr_battles > 0 else 0
         )
 
         geral_txt = (
-            f"• **Total de Batalhas:** {battles_all:,}\n"
+            f"• **Total de Batalhas:** {curr_battles:,}\n"
             f"• **WR Geral:** {wr_all:.2f}%\n"
             f"• **Dano Médio Geral:** {avg_dmg_all:.0f}"
         )
@@ -261,11 +304,12 @@ async def blitz(ctx):
         embed.add_field(
             name="🏆 Carreira (Geral)", value=geral_txt, inline=False
         )
-        embed.set_footer(text="Calculado via Delta de Snapshots (WG & Blitz)")
+        embed.set_footer(
+            text="Sistema de Histórico Local (Estilo Aftermath Database)"
+        )
 
         await loading_msg.edit(content="", embed=embed)
 
-    # --- FLUXO 2: Calculadora de Winrate ---
     elif opcao == "2":
       await ctx.send("🧮 **Calculadora de Meta de Winrate**")
 
@@ -375,6 +419,6 @@ async def blitz(ctx):
     await ctx.send(f"❌ Ocorreu um erro ao processar: `{e}`")
 
 
-# --- 3. INICIALIZAÇÃO ---
+# --- 4. INICIALIZAÇÃO ---
 keep_alive()
 bot.run(DISCORD_TOKEN)
