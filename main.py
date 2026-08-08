@@ -1,6 +1,7 @@
 import asyncio
 import math
 import os
+import time
 from threading import Thread
 import aiohttp
 import discord
@@ -36,7 +37,6 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 
 
 async def find_player(nickname: str, session: aiohttp.ClientSession):
-  """Busca o ID do jogador e região pela API da Wargaming."""
   regions = {
       "na": "https://api.wotblitz.com",
       "eu": "https://api.wotblitz.eu",
@@ -81,7 +81,7 @@ async def blitz(ctx):
     return m.author == ctx.author and m.channel == ctx.channel
 
   try:
-    # --- PASSO 1: Menu principal ---
+    # --- PASSO 1: Menu Principal ---
     await ctx.send(
         "🎮 **Menu Blitz**\n"
         "O que você deseja fazer?\n"
@@ -111,8 +111,8 @@ async def blitz(ctx):
       msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
       escolha = msg_periodo.content.strip().lower()
 
-      period_map = {
-          "1": (30, "30 Dias"),
+      days_map = {
+          "1": (1, "24 Horas"),
           "1d": (1, "24 Horas"),
           "2": (7, "7 Dias"),
           "7d": (7, "7 Dias"),
@@ -122,13 +122,20 @@ async def blitz(ctx):
           "90d": (90, "90 Dias"),
       }
 
-      days_limit, period_label = period_map.get(escolha, (30, "30 Dias"))
+      days_limit, period_label = days_map.get(escolha, (30, "30 Dias"))
 
       loading_msg = await ctx.send(
-          f"🔍 Buscando dados de **{nickname}**..."
+          f"🔍 Buscando histórico de **{nickname}**..."
       )
 
-      async with aiohttp.ClientSession() as session:
+      headers = {
+          "User-Agent": (
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+              " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          )
+      }
+
+      async with aiohttp.ClientSession(headers=headers) as session:
         region_code, base_url, account_id, player_name = await find_player(
             nickname, session
         )
@@ -144,74 +151,89 @@ async def blitz(ctx):
 
         timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Dados Globais da Carreira (Wargaming API)
+        # 1. Consulta dados atuais da Wargaming
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
           player_info = wg_data.get("data", {}).get(str(account_id), {})
           stats_all = player_info.get("statistics", {}).get("all", {})
 
-        # 2. Dados do Período (BlitzStars Endpoint de Estatísticas do Jogador)
-        bs_url = f"https://api.blitzstars.com/player/{account_id}/savestats"
+        # 2. Busca histórico no BlitzStars para cálculo de Delta (Aftermath Method)
+        bs_hist_url = (
+            f"https://www.blitzstars.com/api/playerstats/{account_id}"
+        )
+        snapshots = []
+        try:
+          async with session.get(bs_hist_url, timeout=timeout) as resp:
+            if resp.status == 200:
+              raw_json = await resp.json()
+              if isinstance(raw_json, list):
+                snapshots = raw_json
+              elif isinstance(raw_json, dict):
+                snapshots = [raw_json]
+        except Exception as e:
+          print(f"Erro na busca de histórico: {e}")
+
         periodo_txt = None
 
-        try:
-          headers = {
-              "User-Agent": (
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                  " AppleWebKit/537.36"
+        if snapshots and len(snapshots) > 0 and stats_all:
+          current_battles = stats_all.get("battles", 0)
+          current_wins = stats_all.get("wins", 0)
+          current_damage = stats_all.get("damage_dealt", 0)
+
+          now = time.time()
+          target_timestamp = now - (days_limit * 86400)
+
+          # Encontra o snapshot histórico mais próximo da data limite selecionada
+          closest_snapshot = None
+          smallest_diff = float("inf")
+
+          for snap in snapshots:
+            snap_time = snap.get("createdAt") or snap.get("updatedAt")
+            if isinstance(snap_time, (int, float)):
+              # Converte para segundos se estiver em ms
+              if snap_time > 2000000000:
+                snap_time /= 1000
+
+              diff = abs(snap_time - target_timestamp)
+              if diff < smallest_diff:
+                smallest_diff = diff
+                closest_snapshot = snap
+
+          if closest_snapshot:
+            # Pega valores do snapshot antigo
+            old_all = closest_snapshot.get(
+                "all", closest_snapshot.get("statistics", {}).get("all", {})
+            )
+            old_battles = old_all.get("battles", 0)
+            old_wins = old_all.get("wins", 0)
+            old_damage = old_all.get("damage_dealt", 0)
+
+            # Cálculo de Delta
+            battles_p = current_battles - old_battles
+            wins_p = current_wins - old_wins
+            damage_p = current_damage - old_damage
+
+            if battles_p > 0:
+              losses_p = battles_p - wins_p
+              wr_p = (wins_p / battles_p) * 100
+              avg_dmg_p = damage_p / battles_p
+
+              periodo_txt = (
+                  f"• **Batalhas:** {battles_p:,}\n"
+                  f"• **Vitórias:** {wins_p:,}V / {losses_p:,}D\n"
+                  f"• **WR:** {wr_p:.2f}%\n"
+                  f"• **Dano Médio:** {avg_dmg_p:.0f}"
               )
-          }
-          async with session.get(
-              bs_url, headers=headers, timeout=timeout
-          ) as resp:
-            if resp.status == 200:
-              bs_data = await resp.json()
-
-              # Se for retornado uma lista de registros por período
-              if isinstance(bs_data, list) and len(bs_data) > 0:
-                # Procura a chave correspondente aos dias selecionados (ex: 'period30d', 'period7d', etc.)
-                p_key = f"period{days_limit}d"
-                matched_period = None
-
-                for record in bs_data:
-                  if p_key in record:
-                    matched_period = record[p_key]
-                    break
-                  elif record.get("period") == days_limit:
-                    matched_period = record
-                    break
-
-                if not matched_period and len(bs_data) > 0:
-                  matched_period = bs_data[0]
-
-                if matched_period:
-                  battles_p = matched_period.get("battles", 0)
-                  wins_p = matched_period.get("wins", 0)
-                  damage_p = matched_period.get("damage_dealt", 0)
-                  losses_p = battles_p - wins_p
-
-                  if battles_p > 0:
-                    wr_p = (wins_p / battles_p) * 100
-                    avg_dmg_p = damage_p / battles_p
-
-                    periodo_txt = (
-                        f"• **Batalhas:** {battles_p:,}\n"
-                        f"• **Vitórias:** {wins_p:,}V / {losses_p:,}D\n"
-                        f"• **WR:** {wr_p:.2f}%\n"
-                        f"• **Dano Médio:** {avg_dmg_p:.0f}"
-                    )
-        except Exception as e:
-          print(f"Erro na busca BlitzStars: {e}")
 
         if not periodo_txt:
           periodo_txt = (
-              f"Nenhuma atividade registrada nos últimos {period_label} no"
-              " BlitzStars.\n*(O jogador precisa ser buscado no site"
-              " Blitzstars.com para gerar histórico)*"
+              f"Nenhum histórico de snapshot encontrado para os últimos"
+              f" {period_label}.\n*(Para funcionar, o jogador precisa ter"
+              " registros salvos no BlitzStars durante este período)*"
           )
 
-        # Dados da Carreira Geral
+        # Estatísticas Globais de Carreira
         battles_all = stats_all.get("battles", 0)
         wins_all = stats_all.get("wins", 0)
         wr_all = (wins_all / battles_all * 100) if battles_all > 0 else 0
@@ -239,7 +261,7 @@ async def blitz(ctx):
         embed.add_field(
             name="🏆 Carreira (Geral)", value=geral_txt, inline=False
         )
-        embed.set_footer(text="Dados obtidos via Wargaming API & BlitzStars")
+        embed.set_footer(text="Calculado via Delta de Snapshots (WG & Blitz)")
 
         await loading_msg.edit(content="", embed=embed)
 
