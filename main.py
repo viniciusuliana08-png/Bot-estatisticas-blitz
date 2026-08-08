@@ -56,7 +56,6 @@ def save_snapshot(
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
 
-  # Verifica o último registro salvo
   cursor.execute(
       """
         SELECT battles FROM snapshots 
@@ -67,7 +66,6 @@ def save_snapshot(
   )
   last = cursor.fetchone()
 
-  # Salva apenas se for um registro novo ou se o jogador jogou partidas
   if last is None or last[0] != battles:
     cursor.execute(
         """
@@ -80,12 +78,13 @@ def save_snapshot(
   conn.close()
 
 
-def get_delta(account_id: int, days: int, curr_b: int, curr_w: int, curr_d: int):
+def get_delta(
+    account_id: int, days: int, curr_b: int, curr_w: int, curr_d: int
+):
   target_ts = int(time.time()) - (days * 86400)
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
 
-  # Busca o registro mais antigo dentro do limite de dias
   cursor.execute(
       """
         SELECT battles, wins, damage FROM snapshots 
@@ -96,7 +95,6 @@ def get_delta(account_id: int, days: int, curr_b: int, curr_w: int, curr_d: int)
   )
   old_snap = cursor.fetchone()
 
-  # Se não houver registro tão antigo, pega o primeiro registrado
   if not old_snap:
     cursor.execute(
         """
@@ -162,6 +160,19 @@ async def find_player(nickname: str, session: aiohttp.ClientSession):
   return None, None, None, None
 
 
+async def get_tank_encyclopedia(base_url: str, session: aiohttp.ClientSession):
+  """Obtém a lista global de tanques da Wargaming para mapear ID -> Nome do Tanque."""
+  url = f"{base_url}/wotb/encyclopedia/vehicles/?application_id={APPLICATION_ID}&language=pt-br"
+  try:
+    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+      if resp.status == 200:
+        data = await resp.json()
+        return data.get("data", {})
+  except Exception as e:
+    print(f"Erro ao buscar enciclopédia: {e}")
+  return {}
+
+
 @bot.event
 async def on_ready():
   print(f"Bot conectado com sucesso como {bot.user}")
@@ -178,22 +189,22 @@ async def blitz(ctx):
     await ctx.send(
         "🎮 **Menu Blitz**\n"
         "O que você deseja fazer?\n"
-        "1️⃣ Ver Estatísticas de um Jogador\n"
-        "2️⃣ Calcular Meta de Winrate\n\n"
-        "*Digite `1` ou `2`:*"
+        "1️⃣ Ver Estatísticas Gerais de um Jogador\n"
+        "2️⃣ Ver Estatísticas de um Tanque Específico 🛡️\n"
+        "3️⃣ Calcular Meta de Winrate 🧮\n\n"
+        "*Digite `1`, `2` ou `3`:*"
     )
     msg_opcao = await bot.wait_for("message", check=check, timeout=90.0)
     opcao = msg_opcao.content.strip()
 
+    # --- OPÇÃO 1: ESTATÍSTICAS GERAIS ---
     if opcao == "1":
-      await ctx.send(
-          "Qual é o **nickname** do jogador no World of Tanks Blitz?"
-      )
+      await ctx.send("Qual é o **nickname** do jogador?")
       msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
       nickname = msg_nick.content.strip()
 
       await ctx.send(
-          "Escolha o **período** das estatísticas:\n"
+          "Escolha o **período**:\n"
           "1️⃣ 24 Horas (`1d`)\n"
           "2️⃣ 7 Dias (`7d`)\n"
           "3️⃣ 30 Dias (`30d`)\n"
@@ -213,7 +224,6 @@ async def blitz(ctx):
           "4": (90, "90 Dias"),
           "90d": (90, "90 Dias"),
       }
-
       days_limit, period_label = days_map.get(escolha, (30, "30 Dias"))
 
       loading_msg = await ctx.send(
@@ -224,19 +234,13 @@ async def blitz(ctx):
         region_code, base_url, account_id, player_name = await find_player(
             nickname, session
         )
-
         if not account_id:
           await loading_msg.edit(
-              content=(
-                  f"❌ Jogador **{nickname}** não foi encontrado nos"
-                  " servidores NA, EU ou ASIA."
-              )
+              content=f"❌ Jogador **{nickname}** não foi encontrado."
           )
           return
 
         timeout = aiohttp.ClientTimeout(total=12)
-
-        # Consulta dados acumulados da carreira
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
@@ -247,19 +251,15 @@ async def blitz(ctx):
         curr_wins = stats_all.get("wins", 0)
         curr_damage = stats_all.get("damage_dealt", 0)
 
-        # Calcula o delta exato com base no histórico gravado
         b_delta, w_delta, d_delta = get_delta(
             account_id, days_limit, curr_battles, curr_wins, curr_damage
         )
-
-        # Atualiza a base de dados com a busca atual
         save_snapshot(account_id, curr_battles, curr_wins, curr_damage)
 
         if b_delta > 0:
           l_delta = b_delta - w_delta
           wr_delta = (w_delta / b_delta) * 100
           avg_dmg_delta = d_delta / b_delta
-
           periodo_txt = (
               f"• **Batalhas:** {b_delta:,}\n"
               f"• **Vitórias:** {w_delta:,}V / {l_delta:,}D\n"
@@ -268,12 +268,10 @@ async def blitz(ctx):
           )
         else:
           periodo_txt = (
-              f"Primeiro registro cadastrado para **{player_name}**!\n"
-              "*Realize novas buscas após jogar partidas para ver a variação"
-              " exata de estatísticas.*"
+              f"Registro atualizado para **{player_name}**!\n"
+              "*Jogue novas partidas e consulte novamente para ver o delta.*"
           )
 
-        # Estatísticas Globais de Carreira
         wr_all = (curr_wins / curr_battles * 100) if curr_battles > 0 else 0
         avg_dmg_all = (
             (curr_damage / curr_battles) if curr_battles > 0 else 0
@@ -298,10 +296,161 @@ async def blitz(ctx):
             name="🏆 Carreira (Geral)", value=geral_txt, inline=False
         )
         embed.set_footer(text="Tracker de Deltas via Wargaming API")
-
         await loading_msg.edit(content="", embed=embed)
 
+    # --- OPÇÃO 2: ESTATÍSTICAS POR TANQUE ---
     elif opcao == "2":
+      await ctx.send("Qual é o **nickname** do jogador?")
+      msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
+      nickname = msg_nick.content.strip()
+
+      await ctx.send(
+          "Qual é o **nome do tanque**?\n*Exemplo: `T49`, `WZ-122`, `T110E3` ou"
+          " `Tiger`*"
+      )
+      msg_tank = await bot.wait_for("message", check=check, timeout=90.0)
+      search_tank_name = msg_tank.content.strip().lower()
+
+      loading_msg = await ctx.send(
+          f"🔍 Buscando o tanque **{msg_tank.content}** na conta de"
+          f" **{nickname}**..."
+      )
+
+      async with aiohttp.ClientSession() as session:
+        region_code, base_url, account_id, player_name = await find_player(
+            nickname, session
+        )
+        if not account_id:
+          await loading_msg.edit(
+              content=f"❌ Jogador **{nickname}** não foi encontrado."
+          )
+          return
+
+        # 1. Carrega Enciclopédia de Veículos
+        encyclopedia = await get_tank_encyclopedia(base_url, session)
+        if not encyclopedia:
+          await loading_msg.edit(
+              content="❌ Não foi possível carregar a base de tanques no momento."
+          )
+          return
+
+        # 2. Busca IDs dos tanques que batem com o termo pesquisado
+        matching_tanks = {}
+        for t_id, t_info in encyclopedia.items():
+          t_name = t_info.get("name", "")
+          if search_tank_name in t_name.lower():
+            matching_tanks[int(t_id)] = t_info
+
+        if not matching_tanks:
+          await loading_msg.edit(
+              content=(
+                  f"❌ Nenhum tanque encontrado com o nome"
+                  f" **'{msg_tank.content}'**."
+              )
+          )
+          return
+
+        # 3. Busca histórico de tanques jogados da conta
+        tanks_url = f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}"
+        async with session.get(
+            tanks_url, timeout=aiohttp.ClientTimeout(total=12)
+        ) as resp:
+          t_json = await resp.json()
+          user_tanks = t_json.get("data", {}).get(str(account_id), []) or []
+
+        # 4. Cruza os tanques encontrados na conta
+        found_stats = []
+        for u_tank in user_tanks:
+          tank_id = u_tank.get("tank_id")
+          if tank_id in matching_tanks:
+            tank_info = matching_tanks[tank_id]
+            stats = u_tank.get("all", {})
+            found_stats.append({
+                "name": tank_info.get("name"),
+                "tier": tank_info.get("tier"),
+                "type": tank_info.get("type"),
+                "icon": tank_info.get("images", {}).get("preview_image"),
+                "battles": stats.get("battles", 0),
+                "wins": stats.get("wins", 0),
+                "damage": stats.get("damage_dealt", 0),
+                "shots": stats.get("shots", 0),
+                "hits": stats.get("hits", 0),
+                "frags": stats.get("frags", 0),
+            })
+
+        if not found_stats:
+          await loading_msg.edit(
+              content=(
+                  f"❌ **{player_name}** possui o cadastro do jogo, mas"
+                  f" **nunca jogou batalhas** com um tanque compatível a"
+                  f" '{msg_tank.content}'."
+              )
+          )
+          return
+
+        # Seleciona o tanque com mais partidas caso haja múltiplos resultados
+        found_stats.sort(key=lambda x: x["battles"], reverse=True)
+        selected_tank = found_stats[0]
+
+        b = selected_tank["battles"]
+        w = selected_tank["wins"]
+        d = selected_tank["damage"]
+        l = b - w
+        wr = (w / b * 100) if b > 0 else 0
+        avg_dmg = (d / b) if b > 0 else 0
+        accuracy = (
+            (selected_tank["hits"] / selected_tank["shots"] * 100)
+            if selected_tank["shots"] > 0
+            else 0
+        )
+        avg_frags = (selected_tank["frags"] / b) if b > 0 else 0
+
+        tank_type_map = {
+            "lightTank": "Tanque Leve ⚡",
+            "mediumTank": "Tanque Médio 🎯",
+            "heavyTank": "Tanque Pesado 🛡️",
+            "AT-SPG": "Caça-Tanques 💥",
+        }
+        tipo_str = tank_type_map.get(
+            selected_tank["type"], selected_tank["type"]
+        )
+
+        embed = discord.Embed(
+            title=(
+                f"🛡️ Estatísticas: {selected_tank['name']} (Tier"
+                f" {selected_tank['tier']})"
+            ),
+            description=(
+                f"Jogador: **{player_name}** [{region_code.upper()}]\nTipo:"
+                f" **{tipo_str}**"
+            ),
+            color=0xE74C3C,
+        )
+        embed.add_field(
+            name="📊 Desempenho no Tanque",
+            value=(
+                f"• **Batalhas Totais:** {b:,}\n"
+                f"• **Vitórias:** {w:,}V / {l:,}D\n"
+                f"• **Taxa de Vitórias (WR):** {wr:.2f}%\n"
+                f"• **Dano Médio:** {avg_dmg:.0f}\n"
+                f"• **Precisão dos Tiros:** {accuracy:.1f}%\n"
+                f"• **Média de Abates/Partida:** {avg_frags:.2f}"
+            ),
+            inline=False,
+        )
+
+        if selected_tank["icon"]:
+          embed.set_thumbnail(url=selected_tank["icon"])
+
+        embed.set_footer(
+            text=(
+                "Exibindo dados acumulados do veículo na Wargaming Official API"
+            )
+        )
+        await loading_msg.edit(content="", embed=embed)
+
+    # --- OPÇÃO 3: CALCULADORA DE WINRATE ---
+    elif opcao == "3":
       await ctx.send("🧮 **Calculadora de Meta de Winrate**")
 
       await ctx.send("1️⃣ Quantas **batalhas no total** você tem atualmente?")
@@ -399,7 +548,8 @@ async def blitz(ctx):
 
     else:
       await ctx.send(
-          "❌ Opção inválida! Execute `!blitz` novamente e escolha `1` ou `2`."
+          "❌ Opção inválida! Execute `!blitz` novamente e escolha `1`, `2` ou"
+          " `3`."
       )
 
   except asyncio.TimeoutError:
