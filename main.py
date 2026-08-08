@@ -1,6 +1,7 @@
 import asyncio
 import math
 import os
+import sqlite3
 import time
 from threading import Thread
 import aiohttp
@@ -27,7 +28,100 @@ def keep_alive():
   t.start()
 
 
-# --- 2. CONFIGURAÇÃO DO BOT DISCORD ---
+# --- 2. BANCO DE DADOS LOCAL DE DELTAS ---
+DB_NAME = "blitz_tracker.db"
+
+
+def init_db():
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS snapshots (
+            account_id INTEGER,
+            timestamp INTEGER,
+            battles INTEGER,
+            wins INTEGER,
+            damage INTEGER,
+            PRIMARY KEY (account_id, timestamp)
+        )
+    """)
+  conn.commit()
+  conn.close()
+
+
+def save_snapshot(
+    account_id: int, battles: int, wins: int, damage: int
+) -> None:
+  now = int(time.time())
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  # Verifica o último registro salvo
+  cursor.execute(
+      """
+        SELECT battles FROM snapshots 
+        WHERE account_id = ? 
+        ORDER BY timestamp DESC LIMIT 1
+    """,
+      (account_id,),
+  )
+  last = cursor.fetchone()
+
+  # Salva apenas se for um registro novo ou se o jogador jogou partidas
+  if last is None or last[0] != battles:
+    cursor.execute(
+        """
+            INSERT INTO snapshots (account_id, timestamp, battles, wins, damage)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+        (account_id, now, battles, wins, damage),
+    )
+    conn.commit()
+  conn.close()
+
+
+def get_delta(account_id: int, days: int, curr_b: int, curr_w: int, curr_d: int):
+  target_ts = int(time.time()) - (days * 86400)
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  # Busca o registro mais antigo dentro do limite de dias
+  cursor.execute(
+      """
+        SELECT battles, wins, damage FROM snapshots 
+        WHERE account_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC LIMIT 1
+    """,
+      (account_id, target_ts),
+  )
+  old_snap = cursor.fetchone()
+
+  # Se não houver registro tão antigo, pega o primeiro registrado
+  if not old_snap:
+    cursor.execute(
+        """
+            SELECT battles, wins, damage FROM snapshots 
+            WHERE account_id = ? 
+            ORDER BY timestamp ASC LIMIT 1
+        """,
+        (account_id,),
+    )
+    old_snap = cursor.fetchone()
+
+  conn.close()
+
+  if old_snap and curr_b > old_snap[0]:
+    b_delta = curr_b - old_snap[0]
+    w_delta = curr_w - old_snap[1]
+    d_delta = curr_d - old_snap[2]
+    return b_delta, w_delta, d_delta
+
+  return 0, 0, 0
+
+
+init_db()
+
+# --- 3. CONFIGURAÇÃO DO BOT DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -37,7 +131,6 @@ DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 
 
 async def find_player(nickname: str, session: aiohttp.ClientSession):
-  """Busca o ID e região do jogador na API da Wargaming."""
   regions = {
       "na": "https://api.wotblitz.com",
       "eu": "https://api.wotblitz.eu",
@@ -124,7 +217,7 @@ async def blitz(ctx):
       days_limit, period_label = days_map.get(escolha, (30, "30 Dias"))
 
       loading_msg = await ctx.send(
-          f"🔍 Processando estatísticas recentes de **{nickname}**..."
+          f"🔍 Consultando dados oficiais de **{nickname}**..."
       )
 
       async with aiohttp.ClientSession() as session:
@@ -141,63 +234,46 @@ async def blitz(ctx):
           )
           return
 
-        timeout = aiohttp.ClientTimeout(total=15)
+        timeout = aiohttp.ClientTimeout(total=12)
 
-        # 1. Busca estatísticas gerais do jogador
+        # Consulta dados acumulados da carreira
         info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(info_url, timeout=timeout) as resp:
           wg_data = await resp.json()
           player_info = wg_data.get("data", {}).get(str(account_id), {})
           stats_all = player_info.get("statistics", {}).get("all", {})
 
-        # 2. Busca estatísticas de todos os tanques do jogador
-        tanks_url = f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}"
-        tanks_data = []
-        async with session.get(tanks_url, timeout=timeout) as resp:
-          if resp.status == 200:
-            t_json = await resp.json()
-            tanks_data = t_json.get("data", {}).get(str(account_id), []) or []
-
-        # 3. Filtra tanques jogados dentro da janela do período selecionado
-        now = time.time()
-        time_threshold = now - (days_limit * 86400)
-
-        p_battles = 0
-        p_wins = 0
-        p_damage = 0
-
-        if tanks_data:
-          for tank in tanks_data:
-            last_battle = tank.get("last_battle_time", 0)
-            if last_battle >= time_threshold:
-              all_t = tank.get("all", {})
-              p_battles += all_t.get("battles", 0)
-              p_wins += all_t.get("wins", 0)
-              p_damage += all_t.get("damage_dealt", 0)
-
-        # Trata a exibição dos dados do período
-        if p_battles > 0:
-          p_losses = p_battles - p_wins
-          p_wr = (p_wins / p_battles) * 100
-          p_avg_dmg = p_damage / p_battles
-
-          periodo_txt = (
-              f"• **Batalhas (em tanques ativos):** {p_battles:,}\n"
-              f"• **Vitórias:** {p_wins:,}V / {p_losses:,}D\n"
-              f"• **WR:** {p_wr:.2f}%\n"
-              f"• **Dano Médio:** {p_avg_dmg:.0f}"
-          )
-        else:
-          periodo_txt = (
-              f"Nenhuma batalha encontrada nos tanques ativos nos últimos"
-              f" **{period_label}**."
-          )
-
-        # Estatísticas de Carreira Geral
         curr_battles = stats_all.get("battles", 0)
         curr_wins = stats_all.get("wins", 0)
         curr_damage = stats_all.get("damage_dealt", 0)
 
+        # Calcula o delta exato com base no histórico gravado
+        b_delta, w_delta, d_delta = get_delta(
+            account_id, days_limit, curr_battles, curr_wins, curr_damage
+        )
+
+        # Atualiza a base de dados com a busca atual
+        save_snapshot(account_id, curr_battles, curr_wins, curr_damage)
+
+        if b_delta > 0:
+          l_delta = b_delta - w_delta
+          wr_delta = (w_delta / b_delta) * 100
+          avg_dmg_delta = d_delta / b_delta
+
+          periodo_txt = (
+              f"• **Batalhas:** {b_delta:,}\n"
+              f"• **Vitórias:** {w_delta:,}V / {l_delta:,}D\n"
+              f"• **WR Recente:** {wr_delta:.2f}%\n"
+              f"• **Dano Médio Recente:** {avg_dmg_delta:.0f}"
+          )
+        else:
+          periodo_txt = (
+              f"Primeiro registro cadastrado para **{player_name}**!\n"
+              "*Realize novas buscas após jogar partidas para ver a variação"
+              " exata de estatísticas.*"
+          )
+
+        # Estatísticas Globais de Carreira
         wr_all = (curr_wins / curr_battles * 100) if curr_battles > 0 else 0
         avg_dmg_all = (
             (curr_damage / curr_battles) if curr_battles > 0 else 0
@@ -214,14 +290,14 @@ async def blitz(ctx):
             color=0x3498DB,
         )
         embed.add_field(
-            name=f"📊 Desempenho ({period_label})",
+            name=f"📊 Desempenho Recente ({period_label})",
             value=periodo_txt,
             inline=False,
         )
         embed.add_field(
             name="🏆 Carreira (Geral)", value=geral_txt, inline=False
         )
-        embed.set_footer(text="Dados obtidos via Wargaming Official API")
+        embed.set_footer(text="Tracker de Deltas via Wargaming API")
 
         await loading_msg.edit(content="", embed=embed)
 
@@ -334,6 +410,6 @@ async def blitz(ctx):
     await ctx.send(f"❌ Ocorreu um erro ao processar: `{e}`")
 
 
-# --- 3. INICIALIZAÇÃO ---
+# --- 4. INICIALIZAÇÃO ---
 keep_alive()
 bot.run(DISCORD_TOKEN)
