@@ -35,6 +35,8 @@ DB_NAME = "blitz_tracker.db"
 def init_db():
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
+
+  # Tabela para snapshots gerais da conta
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
             account_id INTEGER,
@@ -43,6 +45,19 @@ def init_db():
             wins INTEGER,
             damage INTEGER,
             PRIMARY KEY (account_id, timestamp)
+        )
+    """)
+
+  # Tabela para snapshots individuais por tanque
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tank_snapshots (
+            account_id INTEGER,
+            tank_id INTEGER,
+            timestamp INTEGER,
+            battles INTEGER,
+            wins INTEGER,
+            damage INTEGER,
+            PRIMARY KEY (account_id, tank_id, timestamp)
         )
     """)
   conn.commit()
@@ -117,6 +132,79 @@ def get_delta(
   return 0, 0, 0
 
 
+def save_tank_snapshot(
+    account_id: int, tank_id: int, battles: int, wins: int, damage: int
+):
+  now = int(time.time())
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  cursor.execute(
+      """
+        SELECT battles FROM tank_snapshots 
+        WHERE account_id = ? AND tank_id = ? 
+        ORDER BY timestamp DESC LIMIT 1
+    """,
+      (account_id, tank_id),
+  )
+  last = cursor.fetchone()
+
+  if last is None or last[0] != battles:
+    cursor.execute(
+        """
+            INSERT INTO tank_snapshots (account_id, tank_id, timestamp, battles, wins, damage)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (account_id, tank_id, now, battles, wins, damage),
+    )
+    conn.commit()
+  conn.close()
+
+
+def get_tank_delta(
+    account_id: int,
+    tank_id: int,
+    days: int,
+    curr_b: int,
+    curr_w: int,
+    curr_d: int,
+):
+  target_ts = int(time.time()) - (days * 86400)
+  conn = sqlite3.connect(DB_NAME)
+  cursor = conn.cursor()
+
+  cursor.execute(
+      """
+        SELECT battles, wins, damage FROM tank_snapshots 
+        WHERE account_id = ? AND tank_id = ? AND timestamp <= ? 
+        ORDER BY timestamp DESC LIMIT 1
+    """,
+      (account_id, tank_id, target_ts),
+  )
+  old_snap = cursor.fetchone()
+
+  if not old_snap:
+    cursor.execute(
+        """
+            SELECT battles, wins, damage FROM tank_snapshots 
+            WHERE account_id = ? AND tank_id = ? 
+            ORDER BY timestamp ASC LIMIT 1
+        """,
+        (account_id, tank_id),
+    )
+    old_snap = cursor.fetchone()
+
+  conn.close()
+
+  if old_snap and curr_b > old_snap[0]:
+    b_delta = curr_b - old_snap[0]
+    w_delta = curr_w - old_snap[1]
+    d_delta = curr_d - old_snap[2]
+    return b_delta, w_delta, d_delta
+
+  return 0, 0, 0
+
+
 init_db()
 
 # --- 3. CONFIGURAÇÃO DO BOT DISCORD ---
@@ -161,8 +249,6 @@ async def find_player(nickname: str, session: aiohttp.ClientSession):
 
 
 async def get_tank_encyclopedia(base_url: str, session: aiohttp.ClientSession):
-  """Busca a lista completa de tanques de forma rápida com fallback duplo."""
-  # 1. Tentativa principal via BlitzStars (leve e completa)
   try:
     async with session.get(
         "https://www.blitzstars.com/api/tanks",
@@ -189,7 +275,6 @@ async def get_tank_encyclopedia(base_url: str, session: aiohttp.ClientSession):
   except Exception as e:
     print(f"Erro ao buscar tanques via BlitzStars: {e}")
 
-  # 2. Fallback via Wargaming API (otimizado por campos específicos)
   url = f"{base_url}/wotb/encyclopedia/vehicles/?application_id={APPLICATION_ID}&fields=tank_id,name,tier,type,images"
   try:
     async with session.get(
@@ -212,8 +297,6 @@ async def on_ready():
 
 @bot.command()
 async def blitz(ctx):
-  """Menu interativo do bot."""
-
   def check(m):
     return m.author == ctx.author and m.channel == ctx.channel
 
@@ -330,7 +413,7 @@ async def blitz(ctx):
         embed.set_footer(text="Tracker de Deltas via Wargaming API")
         await loading_msg.edit(content="", embed=embed)
 
-    # --- OPÇÃO 2: ESTATÍSTICAS POR TANQUE ---
+    # --- OPÇÃO 2: ESTATÍSTICAS POR TANQUE COM SUB-INTERFACE ---
     elif opcao == "2":
       await ctx.send("Qual é o **nickname** do jogador?")
       msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
@@ -342,6 +425,16 @@ async def blitz(ctx):
       )
       msg_tank = await bot.wait_for("message", check=check, timeout=90.0)
       search_tank_name = msg_tank.content.strip().lower()
+
+      # Sub-interface de escolha de modo
+      await ctx.send(
+          "Qual **visualização** você deseja para este tanque?\n"
+          "1️⃣ **Histórico Integral (Carreira)** — Estatísticas totais com o tanque\n"
+          "2️⃣ **Jogados no Dia (Últimas 24h)** — Partidas jogadas hoje com o tanque\n\n"
+          "*Digite `1` ou `2`:*"
+      )
+      msg_modo = await bot.wait_for("message", check=check, timeout=90.0)
+      modo_tanque = msg_modo.content.strip()
 
       loading_msg = await ctx.send(
           f"🔍 Buscando o tanque **{msg_tank.content}** na conta de"
@@ -358,7 +451,6 @@ async def blitz(ctx):
           )
           return
 
-        # 1. Carrega Enciclopédia de Veículos
         encyclopedia = await get_tank_encyclopedia(base_url, session)
         if not encyclopedia:
           await loading_msg.edit(
@@ -366,7 +458,6 @@ async def blitz(ctx):
           )
           return
 
-        # 2. Busca flexível removendo hífens e espaços
         clean_search = (
             search_tank_name.replace("-", "").replace(" ", "").replace("_", "")
         )
@@ -389,7 +480,6 @@ async def blitz(ctx):
           )
           return
 
-        # 3. Busca histórico de tanques jogados do perfil
         tanks_url = f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}"
         async with session.get(
             tanks_url, timeout=aiohttp.ClientTimeout(total=12)
@@ -397,7 +487,6 @@ async def blitz(ctx):
           t_json = await resp.json()
           user_tanks = t_json.get("data", {}).get(str(account_id), []) or []
 
-        # 4. Filtra tanques jogados que correspondem à busca
         found_stats = []
         for u_tank in user_tanks:
           tank_id = u_tank.get("tank_id")
@@ -405,6 +494,7 @@ async def blitz(ctx):
             tank_info = matching_tanks[tank_id]
             stats = u_tank.get("all", {})
             found_stats.append({
+                "tank_id": tank_id,
                 "name": tank_info.get("name"),
                 "tier": tank_info.get("tier"),
                 "type": tank_info.get("type"),
@@ -426,22 +516,9 @@ async def blitz(ctx):
           )
           return
 
-        # Pega o tanque que tem mais partidas em caso de nomes semelhantes
         found_stats.sort(key=lambda x: x["battles"], reverse=True)
         selected_tank = found_stats[0]
-
-        b = selected_tank["battles"]
-        w = selected_tank["wins"]
-        d = selected_tank["damage"]
-        l = b - w
-        wr = (w / b * 100) if b > 0 else 0
-        avg_dmg = (d / b) if b > 0 else 0
-        accuracy = (
-            (selected_tank["hits"] / selected_tank["shots"] * 100)
-            if selected_tank["shots"] > 0
-            else 0
-        )
-        avg_frags = (selected_tank["frags"] / b) if b > 0 else 0
+        t_id = selected_tank["tank_id"]
 
         tank_type_map = {
             "lightTank": "Tanque Leve ⚡",
@@ -453,37 +530,97 @@ async def blitz(ctx):
             selected_tank["type"], selected_tank["type"]
         )
 
-        embed = discord.Embed(
-            title=(
-                f"🛡️ Estatísticas: {selected_tank['name']} (Tier"
-                f" {selected_tank['tier']})"
-            ),
-            description=(
-                f"Jogador: **{player_name}** [{region_code.upper()}]\nTipo:"
-                f" **{tipo_str}**"
-            ),
-            color=0xE74C3C,
-        )
-        embed.add_field(
-            name="📊 Desempenho no Tanque",
-            value=(
-                f"• **Batalhas Totais:** {b:,}\n"
-                f"• **Vitórias:** {w:,}V / {l:,}D\n"
-                f"• **Taxa de Vitórias (WR):** {wr:.2f}%\n"
-                f"• **Dano Médio:** {avg_dmg:.0f}\n"
-                f"• **Precisão dos Tiros:** {accuracy:.1f}%\n"
-                f"• **Média de Abates/Partida:** {avg_frags:.2f}"
-            ),
-            inline=False,
-        )
+        b_curr = selected_tank["battles"]
+        w_curr = selected_tank["wins"]
+        d_curr = selected_tank["damage"]
+
+        # EXIBIÇÃO: JOGADOS NO DIA (24H)
+        if modo_tanque == "2":
+          b_delta, w_delta, d_delta = get_tank_delta(
+              account_id, t_id, 1, b_curr, w_curr, d_curr
+          )
+          save_tank_snapshot(account_id, t_id, b_curr, w_curr, d_curr)
+
+          embed = discord.Embed(
+              title=(
+                  f"📅 Estatísticas do Dia: {selected_tank['name']} (Tier"
+                  f" {selected_tank['tier']})"
+              ),
+              description=(
+                  f"Jogador: **{player_name}** [{region_code.upper()}]\nTipo:"
+                  f" **{tipo_str}**"
+              ),
+              color=0xE67E22,
+          )
+
+          if b_delta > 0:
+            l_delta = b_delta - w_delta
+            wr_delta = (w_delta / b_delta) * 100
+            avg_dmg_delta = d_delta / b_delta
+            embed.add_field(
+                name="📊 Desempenho nas Últimas 24h",
+                value=(
+                    f"• **Batalhas do Dia:** {b_delta:,}\n"
+                    f"• **Vitórias:** {w_delta:,}V / {l_delta:,}D\n"
+                    f"• **Winrate Hoje:** {wr_delta:.2f}%\n"
+                    f"• **Dano Médio Hoje:** {avg_dmg_delta:.0f}"
+                ),
+                inline=False,
+            )
+          else:
+            embed.add_field(
+                name="📊 Desempenho nas Últimas 24h",
+                value=(
+                    "Nenhuma nova partida registrada com este tanque hoje.\n"
+                    "*O registro do tanque foi salvo! Jogue com ele e consulte"
+                    " novamente para ver a variação.*"
+                ),
+                inline=False,
+            )
+
+        # EXIBIÇÃO: HISTÓRICO INTEGRAL (PADRÃO)
+        else:
+          save_tank_snapshot(account_id, t_id, b_curr, w_curr, d_curr)
+
+          l_curr = b_curr - w_curr
+          wr_curr = (w_curr / b_curr * 100) if b_curr > 0 else 0
+          avg_dmg_curr = (d_curr / b_curr) if b_curr > 0 else 0
+          accuracy = (
+              (selected_tank["hits"] / selected_tank["shots"] * 100)
+              if selected_tank["shots"] > 0
+              else 0
+          )
+          avg_frags = (selected_tank["frags"] / b_curr) if b_curr > 0 else 0
+
+          embed = discord.Embed(
+              title=(
+                  f"🏆 Carreira Total: {selected_tank['name']} (Tier"
+                  f" {selected_tank['tier']})"
+              ),
+              description=(
+                  f"Jogador: **{player_name}** [{region_code.upper()}]\nTipo:"
+                  f" **{tipo_str}**"
+              ),
+              color=0xE74C3C,
+          )
+          embed.add_field(
+              name="📊 Desempenho Histórico Acumulado",
+              value=(
+                  f"• **Batalhas Totais:** {b_curr:,}\n"
+                  f"• **Vitórias:** {w_curr:,}V / {l_curr:,}D\n"
+                  f"• **Taxa de Vitórias (WR):** {wr_curr:.2f}%\n"
+                  f"• **Dano Médio:** {avg_dmg_curr:.0f}\n"
+                  f"• **Precisão dos Tiros:** {accuracy:.1f}%\n"
+                  f"• **Média de Abates/Partida:** {avg_frags:.2f}"
+              ),
+              inline=False,
+          )
 
         if selected_tank["icon"]:
           embed.set_thumbnail(url=selected_tank["icon"])
 
         embed.set_footer(
-            text=(
-                "Exibindo dados acumulados do veículo na Wargaming Official API"
-            )
+            text="Dados processados via Wargaming Official API & Delta Tracker"
         )
         await loading_msg.edit(content="", embed=embed)
 
