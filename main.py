@@ -163,22 +163,23 @@ async def find_player(nickname: str, session: aiohttp.ClientSession):
 
 async def get_tank_encyclopedia(base_url: str, session: aiohttp.ClientSession):
     try:
-        async with session.get("https://www.blitzstars.com/api/tanks", timeout=8) as resp:
+        async with session.get("https://www.blitzstars.com/api/tanks", timeout=6) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 tanks_dict = {}
                 for tank in data:
-                    t_id = tank.get("tank_id")
+                    t_id = tank.get("tank_id") or tank.get("id")
                     if t_id:
                         tanks_dict[int(t_id)] = {
-                            "name": tank.get("name"),
+                            "name": tank.get("name") or tank.get("short_name"),
                             "tier": tank.get("tier"),
                             "type": tank.get("type"),
                             "images": {
                                 "preview_image": f"https://glossary-wotblitz.gvt.wargaming.net/icons/pay_icon_{t_id}.png"
                             }
                         }
-                return tanks_dict
+                if tanks_dict:
+                    return tanks_dict
     except Exception:
         pass
     
@@ -187,7 +188,7 @@ async def get_tank_encyclopedia(base_url: str, session: aiohttp.ClientSession):
         f"?application_id={APPLICATION_ID}&fields=tank_id,name,tier,type,images"
     )
     try:
-        async with session.get(url, timeout=12) as resp:
+        async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return {int(k): v for k, v in data.get("data", {}).items()}
@@ -243,9 +244,8 @@ async def regcla(ctx):
                 await loading_msg.edit(content=f"❌ Clã `{clean_tag}` não identificado.")
                 return
 
-            await loading_msg.edit(content=f"🔍 Clã **{clan_name}** encontrado! Baixando membros...")
+            await loading_msg.edit(content=f"🔍 Clã **{clan_name}** encontrado! Baixando membros e tanques...")
 
-            # Adicionado extra=members para a Wargaming API retornar os membros corretamente
             url_info = (
                 f"{base_url}/wotb/clans/info/"
                 f"?application_id={APPLICATION_ID}&clan_id={clan_id}&extra=members"
@@ -259,7 +259,6 @@ async def regcla(ctx):
                 clan_obj = info_data.get("data", {}).get(str(clan_id), {})
                 members_data = clan_obj.get("members", {})
 
-            # Tratamento robusto para extrair os IDs de qualquer formato que a API mande
             account_ids = []
             if isinstance(members_data, dict):
                 for acc_id_key, m_info in members_data.items():
@@ -295,6 +294,7 @@ async def regcla(ctx):
                         players_dict = acc_data.get("data", {})
                         for acc_id_str, p_info in players_dict.items():
                             if p_info:
+                                acc_id_int = int(acc_id_str)
                                 nickname = p_info.get("nickname", f"Player_{acc_id_str}")
                                 stats_all = p_info.get("statistics", {}).get("all", {})
                                 battles = stats_all.get("battles", 0)
@@ -302,7 +302,9 @@ async def regcla(ctx):
                                 damage = stats_all.get("damage_dealt", 0)
                                 
                                 lista_nomes.append(nickname)
-                                await save_snapshot(int(acc_id_str), battles, wins, damage)
+                                await save_snapshot(acc_id_int, battles, wins, damage)
+                                # Sincroniza os tanques de cada membro em segundo plano automaticamente
+                                bot.loop.create_task(sync_all_tanks(acc_id_int, base_url, session))
 
             if not lista_nomes:
                 await loading_msg.edit(content="❌ Não foi possível carregar os dados estatísticos.")
@@ -551,9 +553,10 @@ async def blitz(ctx):
                 async with session.get(tanks_url, timeout=12) as resp:
                     user_tanks = (await resp.json()).get("data", {}).get(str(account_id), []) or []
 
-                played_tanks_delta = []
-                for u_tank in user_tanks:
+                async def process_tank(u_tank):
                     t_id = u_tank.get("tank_id")
+                    if not t_id:
+                        return None
                     stats = u_tank.get("all", {})
                     b_curr = stats.get("battles", 0)
                     w_curr = stats.get("wins", 0)
@@ -564,13 +567,18 @@ async def blitz(ctx):
 
                     if b_delta > 0:
                         tank_info = encyclopedia.get(t_id, {})
-                        played_tanks_delta.append({
+                        return {
                             "name": tank_info.get("name", f"Tanque #{t_id}"), 
                             "tier": tank_info.get("tier", "?"),
                             "battles": b_delta, 
                             "wins": w_delta, 
                             "damage": d_delta
-                        })
+                        }
+                    return None
+
+                tasks = [process_tank(u_tank) for u_tank in user_tanks]
+                results = await asyncio.gather(*tasks)
+                played_tanks_delta = [r for r in results if r is not None]
 
                 if not played_tanks_delta:
                     await loading_msg.edit(content=f"📋 **{player_name}**: Nenhum registro no período.")
