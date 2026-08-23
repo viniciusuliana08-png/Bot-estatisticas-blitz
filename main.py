@@ -207,7 +207,7 @@ async def regcla(ctx):
         await ctx.send("❌ Erro: `APPLICATION_ID` ou `CLAN_TAG` não encontrados nas variáveis de ambiente.")
         return
 
-    clean_tag = CLAN_TAG.strip().upper().replace("[", "").replace("]", "")
+    clean_tag = CLAN_TAG.strip().upper()
     loading_msg = await ctx.send(f"⏳ Procurando o clã `{clean_tag}` no servidor NA...")
 
     base_url = "https://api.wotblitz.com"
@@ -226,11 +226,14 @@ async def regcla(ctx):
                 
                 clan_id = None
                 clan_name = ""
+                
                 for clan in data["data"]:
-                    if clan["tag"].upper() == clean_tag:
+                    c_tag = clan["tag"].upper()
+                    if c_tag == clean_tag or c_tag.replace("-", "") == clean_tag.replace("-", ""):
                         clan_id = clan["clan_id"]
                         clan_name = clan["name"]
                         break
+                
                 if not clan_id and data["data"]:
                     clan_id = data["data"][0]["clan_id"]
                     clan_name = data["data"][0]["name"]
@@ -244,18 +247,19 @@ async def regcla(ctx):
 
             url_info = (
                 f"{base_url}/wotb/clans/info/"
-                f"?application_id={APPLICATION_ID}&clan_id={clan_id}"
+                f"?application_id={APPLICATION_ID}&clan_id={clan_id}&fields=members,name,tag"
             )
             async with session.get(url_info, timeout=10) as resp:
                 info_data = await resp.json()
                 if info_data.get("status") != "ok":
-                    await loading_msg.edit(content=f"❌ Erro ao consultar informações do clã.")
+                    await loading_msg.edit(content=f"❌ Erro ao consultar informações do clã na API.")
                     return
                     
-                members = info_data.get("data", {}).get(str(clan_id), {}).get("members", [])
+                clan_obj = info_data.get("data", {}).get(str(clan_id), {})
+                members = clan_obj.get("members", [])
 
             if not members:
-                await loading_msg.edit(content=f"❌ Lista de membros vazia ou inacessível.")
+                await loading_msg.edit(content=f"❌ A API retornou uma lista de membros vazia para este clã.")
                 return
 
             lista_nomes = []
@@ -291,7 +295,7 @@ async def regcla(ctx):
             nomes_str = ", ".join(lista_nomes)
             resposta = (
                 f"**Clã `{clean_tag}` sincronizado com sucesso!**\n\n"
-                f"**Membros:**\n{nomes_str}"
+                f"**Membros ({len(lista_nomes)}):**\n{nomes_str}"
             )
             await loading_msg.edit(content=resposta)
 
