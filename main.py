@@ -245,9 +245,10 @@ async def regcla(ctx):
 
             await loading_msg.edit(content=f"🔍 Clã **{clan_name}** encontrado! Baixando membros...")
 
+            # Adicionado extra=members para a Wargaming API retornar os membros corretamente
             url_info = (
                 f"{base_url}/wotb/clans/info/"
-                f"?application_id={APPLICATION_ID}&clan_id={clan_id}&fields=members,name,tag"
+                f"?application_id={APPLICATION_ID}&clan_id={clan_id}&extra=members"
             )
             async with session.get(url_info, timeout=10) as resp:
                 info_data = await resp.json()
@@ -256,14 +257,29 @@ async def regcla(ctx):
                     return
                     
                 clan_obj = info_data.get("data", {}).get(str(clan_id), {})
-                members = clan_obj.get("members", [])
+                members_data = clan_obj.get("members", {})
 
-            if not members:
+            # Tratamento robusto para extrair os IDs de qualquer formato que a API mande
+            account_ids = []
+            if isinstance(members_data, dict):
+                for acc_id_key, m_info in members_data.items():
+                    if isinstance(m_info, dict) and "account_id" in m_info:
+                        account_ids.append(m_info["account_id"])
+                    else:
+                        try:
+                            account_ids.append(int(acc_id_key))
+                        except ValueError:
+                            pass
+            elif isinstance(members_data, list):
+                for m in members_data:
+                    if isinstance(m, dict) and "account_id" in m:
+                        account_ids.append(m["account_id"])
+
+            if not account_ids:
                 await loading_msg.edit(content=f"❌ A API retornou uma lista de membros vazia para este clã.")
                 return
 
             lista_nomes = []
-            account_ids = [m["account_id"] for m in members]
 
             for i in range(0, len(account_ids), 100):
                 batch_ids = account_ids[i:i+100]
