@@ -32,7 +32,6 @@ snapshots_col = db["snapshots"]
 tank_snapshots_col = db["tank_snapshots"]
 
 async def init_db():
-    # Cria índices para buscas super rápidas no MongoDB
     await snapshots_col.create_index([("account_id", 1), ("timestamp", -1)])
     await tank_snapshots_col.create_index([("account_id", 1), ("tank_id", 1), ("timestamp", -1)])
 
@@ -173,7 +172,7 @@ async def on_ready():
     await init_db()
     print(f"Bot conectado com sucesso como {bot.user}")
 
-# --- NOVO COMANDO: !regcla ---
+# --- COMANDO: !regcla ---
 @bot.command(name="regcla")
 async def regcla(ctx):
     if not APPLICATION_ID or not CLAN_TAG:
@@ -213,7 +212,6 @@ async def regcla(ctx):
             lista_nomes = []
             account_ids = [m["account_id"] for m in members]
 
-            # Processa em lotes de até 100 IDs (limite da API da Wargaming)
             for i in range(0, len(account_ids), 100):
                 batch_ids = account_ids[i:i+100]
                 ids_str = ",".join(map(str, batch_ids))
@@ -408,4 +406,47 @@ async def blitz(ctx):
             loading_msg = await ctx.send(f"📋 Compilando tanques para **{nickname}**...")
 
             async with aiohttp.ClientSession() as session:
-                region_code, base_url, account_id, player_name = awa
+                region_code, base_url, account_id, player_name = await find_player(nickname, session)
+                if not account_id:
+                    await loading_msg.edit(content=f"❌ Jogador não encontrado.")
+                    return
+
+                encyclopedia = await get_tank_encyclopedia(base_url, session)
+                async with session.get(f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}", timeout=12) as resp:
+                    user_tanks = (await resp.json()).get("data", {}).get(str(account_id), []) or []
+
+                played_tanks_delta = []
+                for u_tank in user_tanks:
+                    t_id = u_tank.get("tank_id")
+                    stats = u_tank.get("all", {})
+                    b_curr, w_curr, d_curr = stats.get("battles", 0), stats.get("wins", 0), stats.get("damage_dealt", 0)
+
+                    b_delta, w_delta, d_delta = await get_tank_delta(account_id, t_id, days_limit, b_curr, w_curr, d_curr)
+                    await save_tank_snapshot(account_id, t_id, b_curr, w_curr, d_curr)
+
+                    if b_delta > 0:
+                        tank_info = encyclopedia.get(t_id, {})
+                        played_tanks_delta.append({
+                            "name": tank_info.get("name", f"Tanque #{t_id}"), "tier": tank_info.get("tier", "?"),
+                            "battles": b_delta, "wins": w_delta, "damage": d_delta
+                        })
+
+                if not played_tanks_delta:
+                    await loading_msg.edit(content=f"📋 **{player_name}**: Nenhum registro no período. Snapshots gravados!")
+                    return
+
+                played_tanks_delta.sort(key=lambda x: x["battles"], reverse=True)
+                lines = [f"• **{t['name']}** (T{t['tier']}): {t['battles']}B | WR: **{(t['wins']/t['battles'])*100:.1f}%** | Dmg: **{t['damage']/t['battles']:.0f}**" for t in played_tanks_delta[:15]]
+
+                embed = discord.Embed(title=f"📋 Tanques Jogados — {player_name} ({period_label})", description="\n".join(lines), color=0x9B59B6)
+                await loading_msg.edit(content="", embed=embed)
+
+        elif opcao == "4":
+            await ctx.send("🧮 **Calculadora de Meta de Winrate (Em Construção)**")
+
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ **Tempo esgotado!** Digite `!blitz` para tentar novamente.")
+
+# --- 4. INICIALIZAÇÃO ---
+keep_alive()
+bot.run(DISCORD_TOKEN)
