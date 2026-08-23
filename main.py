@@ -407,6 +407,179 @@ async def blitz(ctx):
 
             await ctx.send("Escolha o **período**:\n1️⃣ **24 Horas**\n2️⃣ **7 Dias**\n3️⃣ **30 Dias**\n\n*Digite `1`, `2` ou `3`:*")
             msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
+            
+            period_options = {
+                "1": (1, "24 Hor                       damage = stats_all.get("damage_dealt", 0)
+                                
+                                lista_nomes.append(nickname)
+                                await save_snapshot(int(acc_id_str), battles, wins, damage)
+
+            if not lista_nomes:
+                await loading_msg.edit(content="❌ Não foi possível carregar os dados estatísticos dos membros.")
+                return
+
+            nomes_str = ", ".join(lista_nomes)
+            
+            resposta = (
+                f"**Ok! Clã `{clean_tag}` sincronizado com sucesso!**\n\n"
+                f"**Lista de jogadores vinculados:**\n{nomes_str}\n\n"
+                f"A partir deste ponto, **todas as funções estão ok e funcionando corretamente**!"
+            )
+
+            await loading_msg.edit(content=resposta)
+
+        except Exception as e:
+            await loading_msg.edit(content=f"❌ Erro inesperado ao sincronizar o clã: {e}")
+
+@bot.command()
+async def blitz(ctx):
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        await ctx.send(
+            "🎮 **Menu Blitz**\n"
+            "O que você deseja fazer?\n"
+            "1️⃣ Estatísticas Gerais do Jogador\n"
+            "2️⃣ Estatísticas de um Tanque Específico 🛡️\n"
+            "3️⃣ Registro de Todos os Tanques Jogados no Período 📋\n"
+            "4️⃣ Calcular Meta de Winrate 🧮\n\n"
+            "*Digite `1`, `2`, `3` ou `4`:*"
+        )
+        msg_opcao = await bot.wait_for("message", check=check, timeout=90.0)
+        opcao = msg_opcao.content.strip()
+
+        if opcao == "1":
+            await ctx.send("Qual é o **nickname** do jogador?")
+            msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
+            nickname = msg_nick.content.strip()
+
+            await ctx.send(
+                "Escolha o **período**:\n1️⃣ 24 Horas (`1d`)\n2️⃣ 7 Dias (`7d`)\n3️⃣ 30 Dias (`30d`)\n\n*Digite `1`, `2` ou `3`:*"
+            )
+            msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
+            escolha = msg_periodo.content.strip().lower()
+
+            days_map = {"1": (1, "24 Horas"), "1d": (1, "24 Horas"), "2": (7, "7 Dias"), "7d": (7, "7 Dias"), "3": (30, "30 Dias"), "30d": (30, "30 Dias")}
+            days_limit, period_label = days_map.get(escolha, (30, "30 Dias"))
+
+            loading_msg = await ctx.send(f"🔍 Consultando dados e sincronizando garagem de **{nickname}**...")
+
+            async with aiohttp.ClientSession() as session:
+                region_code, base_url, account_id, player_name = await find_player(nickname, session)
+                if not account_id:
+                    await loading_msg.edit(content=f"❌ Jogador **{nickname}** não encontrado.")
+                    return
+
+                bot.loop.create_task(sync_all_tanks(account_id, base_url, session))
+
+                info_url = f"{base_url}/wotb/account/info/?application_id={APPLICATION_ID}&account_id={account_id}"
+                async with session.get(info_url, timeout=12) as resp:
+                    wg_data = await resp.json()
+                    stats_all = wg_data.get("data", {}).get(str(account_id), {}).get("statistics", {}).get("all", {})
+
+                curr_battles = stats_all.get("battles", 0)
+                curr_wins = stats_all.get("wins", 0)
+                curr_damage = stats_all.get("damage_dealt", 0)
+
+                b_delta, w_delta, d_delta = await get_delta(account_id, days_limit, curr_battles, curr_wins, curr_damage)
+                await save_snapshot(account_id, curr_battles, curr_wins, curr_damage)
+
+                if b_delta > 0:
+                    wr_delta = (w_delta / b_delta) * 100
+                    avg_dmg_delta = d_delta / b_delta
+                    periodo_txt = f"• **Batalhas:** {b_delta:,}\n• **Vitórias:** {w_delta:,}V / {b_delta - w_delta:,}D\n• **WR Recente:** {wr_delta:.2f}%\n• **Dano Médio Recente:** {avg_dmg_delta:.0f}"
+                else:
+                    periodo_txt = f"Registro atualizado para **{player_name}** e toda a garagem!\n*Jogue novas partidas e consulte novamente.*"
+
+                wr_all = (curr_wins / curr_battles * 100) if curr_battles > 0 else 0
+                avg_dmg_all = (curr_damage / curr_battles) if curr_battles > 0 else 0
+                geral_txt = f"• **Total de Batalhas:** {curr_battles:,}\n• **WR Geral:** {wr_all:.2f}%\n• **Dano Médio Geral:** {avg_dmg_all:.0f}"
+
+                embed = discord.Embed(title=f"Estatísticas de {player_name} [{region_code.upper()}]", color=0x3498DB)
+                embed.add_field(name=f"📊 Desempenho Recente ({period_label})", value=periodo_txt, inline=False)
+                embed.add_field(name="🏆 Carreira (Geral)", value=geral_txt, inline=False)
+                await loading_msg.edit(content="", embed=embed)
+
+        elif opcao == "2":
+            await ctx.send("Qual é o **nickname** do jogador?")
+            msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
+            nickname = msg_nick.content.strip()
+
+            await ctx.send("Qual é o **nome do tanque**?")
+            msg_tank = await bot.wait_for("message", check=check, timeout=90.0)
+            search_tank_name = msg_tank.content.strip().lower()
+
+            await ctx.send("Qual **período**?\n1️⃣ **Carreira**\n2️⃣ **24 Horas**\n3️⃣ **Última Semana**\n4️⃣ **Último Mês**\n\n*Digite `1`, `2`, `3` ou `4`:*")
+            msg_modo = await bot.wait_for("message", check=check, timeout=90.0)
+            modo_input = msg_modo.content.strip().lower()
+
+            days_map = {"1": (0, "Carreira"), "2": (1, "Últimas 24 Horas"), "3": (7, "Última Semana"), "4": (30, "Último Mês")}
+            days_limit, period_label = days_map.get(modo_input, (0, "Carreira"))
+
+            loading_msg = await ctx.send(f"🔍 Buscando **{msg_tank.content}**...")
+
+            async with aiohttp.ClientSession() as session:
+                region_code, base_url, account_id, player_name = await find_player(nickname, session)
+                if not account_id:
+                    await loading_msg.edit(content=f"❌ Jogador **{nickname}** não encontrado.")
+                    return
+
+                encyclopedia = await get_tank_encyclopedia(base_url, session)
+                clean_search = search_tank_name.replace("-", "").replace(" ", "").replace("_", "")
+                matching_tanks = {int(t_id): info for t_id, info in encyclopedia.items() if clean_search in info.get("name", "").lower().replace("-", "").replace(" ", "").replace("_", "")}
+
+                tanks_url = f"{base_url}/wotb/tanks/stats/?application_id={APPLICATION_ID}&account_id={account_id}"
+                async with session.get(tanks_url, timeout=12) as resp:
+                    user_tanks = (await resp.json()).get("data", {}).get(str(account_id), []) or []
+
+                found_stats = []
+                for u_tank in user_tanks:
+                    tank_id = u_tank.get("tank_id")
+                    if tank_id in matching_tanks:
+                        stats = u_tank.get("all", {})
+                        found_stats.append({
+                            "tank_id": tank_id, "name": matching_tanks[tank_id].get("name"),
+                            "tier": matching_tanks[tank_id].get("tier"), "type": matching_tanks[tank_id].get("type"),
+                            "icon": matching_tanks[tank_id].get("images", {}).get("preview_image"),
+                            "battles": stats.get("battles", 0), "wins": stats.get("wins", 0),
+                            "damage": stats.get("damage_dealt", 0), "shots": stats.get("shots", 0),
+                            "hits": stats.get("hits", 0), "frags": stats.get("frags", 0),
+                        })
+
+                if not found_stats:
+                    await loading_msg.edit(content=f"❌ **{player_name}** nunca jogou com o tanque **{msg_tank.content}**.")
+                    return
+
+                selected_tank = max(found_stats, key=lambda x: x["battles"])
+                t_id = selected_tank["tank_id"]
+                b_curr, w_curr, d_curr = selected_tank["battles"], selected_tank["wins"], selected_tank["damage"]
+
+                embed = discord.Embed(title=f"{selected_tank['name']} (Tier {selected_tank['tier']})", color=0xE67E22)
+                
+                if days_limit > 0:
+                    b_delta, w_delta, d_delta = await get_tank_delta(account_id, t_id, days_limit, b_curr, w_curr, d_curr)
+                    await save_tank_snapshot(account_id, t_id, b_curr, w_curr, d_curr)
+
+                    if b_delta > 0:
+                        embed.add_field(name=f"📊 Desempenho ({period_label})", value=f"• **Batalhas:** {b_delta:,}\n• **Vitórias:** {w_delta:,}V / {b_delta-w_delta:,}D\n• **Winrate:** {(w_delta/b_delta)*100:.2f}%\n• **Dano Médio:** {d_delta/b_delta:.0f}")
+                    else:
+                        embed.add_field(name=f"📊 Desempenho ({period_label})", value="Nenhuma nova partida registrada com este tanque no período.")
+                else:
+                    await save_tank_snapshot(account_id, t_id, b_curr, w_curr, d_curr)
+                    embed.add_field(name="📊 Carreira", value=f"• **Batalhas:** {b_curr:,}\n• **Winrate:** {(w_curr/b_curr*100) if b_curr else 0:.2f}%\n• **Dano Médio:** {(d_curr/b_curr) if b_curr else 0:.0f}")
+
+                if selected_tank["icon"]:
+                    embed.set_thumbnail(url=selected_tank["icon"])
+                await loading_msg.edit(content="", embed=embed)
+
+        elif opcao == "3":
+            await ctx.send("Qual é o **nickname** do jogador?")
+            msg_nick = await bot.wait_for("message", check=check, timeout=90.0)
+            nickname = msg_nick.content.strip()
+
+            await ctx.send("Escolha o **período**:\n1️⃣ **24 Horas**\n2️⃣ **7 Dias**\n3️⃣ **30 Dias**\n\n*Digite `1`, `2` ou `3`:*")
+            msg_periodo = await bot.wait_for("message", check=check, timeout=90.0)
             days_limit, period_label = {"1": (1, "24 Horas"), "2": (7, "7 Di
 async def save_snapshot(account_id: int, battles: int, wins: int, damage: int):
     now = int(time.time())
